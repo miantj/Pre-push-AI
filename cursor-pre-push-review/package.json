@@ -1,0 +1,20 @@
+{
+  "name": "cursor-pre-push-review",
+  "version": "1.0.0",
+  "description": "Pre-push AI code review CLI for Cursor",
+  "bin": {
+    "cursor-pre-push": "./bin/cursor-pre-push"
+  },
+  "main": "dist/cli.js",
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "dotenv": "^16.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

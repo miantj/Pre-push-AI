@@ -1,0 +1,102 @@
+"use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.CONFIG_REL_PATH = void 0;
+exports.configFilePath = configFilePath;
+exports.loadConfigFile = loadConfigFile;
+exports.writeConfigFile = writeConfigFile;
+exports.resolveRuntimeConfig = resolveRuntimeConfig;
+exports.shouldRunReview = shouldRunReview;
+const fs = __importStar(require("fs"));
+const path = __importStar(require("path"));
+exports.CONFIG_REL_PATH = ".cursor/pre-push-review.json";
+const DEFAULTS = {
+    enabled: false,
+    baseline: "origin/stable",
+    agent: "cursor",
+    rebaseEnabled: false,
+    rebaseBranch: "origin/main",
+    timeoutMs: 900000,
+};
+function configFilePath(repoRoot) {
+    return path.join(repoRoot, exports.CONFIG_REL_PATH);
+}
+function loadConfigFile(repoRoot) {
+    const filePath = configFilePath(repoRoot);
+    if (!fs.existsSync(filePath))
+        return null;
+    try {
+        const raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
+        return { ...DEFAULTS, ...raw };
+    }
+    catch {
+        return null;
+    }
+}
+function writeConfigFile(repoRoot, config) {
+    const filePath = configFilePath(repoRoot);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+}
+/**
+ * 环境变量优先于配置文件。
+ */
+function resolveRuntimeConfig(repoRoot) {
+    const fromFile = loadConfigFile(repoRoot) ?? { ...DEFAULTS };
+    const agentRaw = process.env.AI_REVIEW_AGENT ?? fromFile.agent;
+    const agent = String(agentRaw).toLowerCase() === "claude" || String(agentRaw).toLowerCase() === "claude-code"
+        ? "claude"
+        : "cursor";
+    let enabled = fromFile.enabled;
+    const hookFlag = process.env.USE_AI_REVIEW_ON_PRE_PUSH_HOOK;
+    if (hookFlag != null && String(hookFlag).trim() !== "") {
+        const v = String(hookFlag).trim().toLowerCase();
+        if (["true", "1", "yes", "on"].includes(v))
+            enabled = true;
+        if (["false", "0", "no", "off"].includes(v))
+            enabled = false;
+    }
+    return {
+        enabled,
+        baseline: process.env.CURSOR_PRE_PUSH_BASELINE?.trim() || fromFile.baseline,
+        agent,
+        rebaseEnabled: fromFile.rebaseEnabled,
+        rebaseBranch: fromFile.rebaseBranch,
+        timeoutMs: Number(process.env.CURSOR_PRE_PUSH_TIMEOUT_MS) || fromFile.timeoutMs,
+    };
+}
+function shouldRunReview(config) {
+    return config.enabled;
+}
