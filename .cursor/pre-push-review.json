@@ -1,6 +1,0 @@
-{
-  "enabled": true,
-  "baseline": "auto",
-  "agent": "cursor",
-  "timeoutMs": 900000
-}
