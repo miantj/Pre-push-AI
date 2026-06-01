@@ -1,2 +1,4 @@
 .cursor/pre-push-find-bugs-last.md
 *.vsix
+.cursor/
+.vscode/
