@@ -46,17 +46,10 @@ class SettingsProvider {
         return vscode.workspace.getConfiguration("cursorPrePush").get("enabled") ?? false;
     }
     get baseline() {
-        return (vscode.workspace.getConfiguration("cursorPrePush").get("baseline") ?? "origin/stable");
+        return (vscode.workspace.getConfiguration("cursorPrePush").get("baseline") ?? "auto");
     }
     get agent() {
         return vscode.workspace.getConfiguration("cursorPrePush").get("agent") ?? "cursor";
-    }
-    get rebaseEnabled() {
-        return (vscode.workspace.getConfiguration("cursorPrePush").get("rebaseEnabled") ?? false);
-    }
-    get rebaseBranch() {
-        return (vscode.workspace.getConfiguration("cursorPrePush").get("rebaseBranch") ??
-            "origin/main");
     }
     get timeoutMs() {
         return (vscode.workspace.getConfiguration("cursorPrePush").get("timeoutMs") ?? 900000);
@@ -74,8 +67,6 @@ class SettingsProvider {
             enabled: enabledOverride ?? this.enabled,
             baseline: this.baseline,
             agent: (this.agent === "claude" ? "claude" : "cursor"),
-            rebaseEnabled: this.rebaseEnabled,
-            rebaseBranch: this.rebaseBranch,
             timeoutMs: this.timeoutMs,
         };
     }

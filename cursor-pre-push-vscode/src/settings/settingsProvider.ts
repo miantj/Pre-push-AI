@@ -8,8 +8,6 @@ export interface PrePushReviewConfig {
   enabled: boolean;
   baseline: string;
   agent: "cursor" | "claude";
-  rebaseEnabled: boolean;
-  rebaseBranch: string;
   timeoutMs: number;
 }
 
@@ -26,25 +24,12 @@ export class SettingsProvider {
 
   get baseline(): string {
     return (
-      vscode.workspace.getConfiguration("cursorPrePush").get<string>("baseline") ?? "origin/stable"
+      vscode.workspace.getConfiguration("cursorPrePush").get<string>("baseline") ?? "auto"
     );
   }
 
   get agent(): string {
     return vscode.workspace.getConfiguration("cursorPrePush").get<string>("agent") ?? "cursor";
-  }
-
-  get rebaseEnabled(): boolean {
-    return (
-      vscode.workspace.getConfiguration("cursorPrePush").get<boolean>("rebaseEnabled") ?? false
-    );
-  }
-
-  get rebaseBranch(): string {
-    return (
-      vscode.workspace.getConfiguration("cursorPrePush").get<string>("rebaseBranch") ??
-      "origin/main"
-    );
   }
 
   get timeoutMs(): number {
@@ -67,8 +52,6 @@ export class SettingsProvider {
       enabled: enabledOverride ?? this.enabled,
       baseline: this.baseline,
       agent: (this.agent === "claude" ? "claude" : "cursor") as "cursor" | "claude",
-      rebaseEnabled: this.rebaseEnabled,
-      rebaseBranch: this.rebaseBranch,
       timeoutMs: this.timeoutMs,
     };
   }

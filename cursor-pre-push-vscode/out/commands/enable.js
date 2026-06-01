@@ -36,8 +36,18 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.registerEnableCommand = registerEnableCommand;
 const vscode = __importStar(require("vscode"));
 const statusBar_1 = require("../infrastructure/statusBar");
+const dependencyInstaller_1 = require("../infrastructure/dependencyInstaller");
 function registerEnableCommand(context, settingsProvider, hookInstaller) {
     context.subscriptions.push(vscode.commands.registerCommand("cursor.prePush.enable", async () => {
+        const deps = await (0, dependencyInstaller_1.ensureDependencies)(context);
+        if (!deps.reviewCli) {
+            (0, dependencyInstaller_1.notifyDependencyIssues)(deps);
+            return;
+        }
+        if (!deps.agent) {
+            (0, dependencyInstaller_1.notifyDependencyIssues)(deps);
+            return;
+        }
         const success = await hookInstaller.install(settingsProvider);
         if (success) {
             await settingsProvider.setEnabled(true);

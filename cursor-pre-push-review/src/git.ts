@@ -23,7 +23,57 @@ export function safeExecGit(repoRoot: string, args: string[], fallback: string):
   }
 }
 
-export function getMergeBase(repoRoot: string, baseline: string = "origin/stable"): string | null {
+/** 自动选择基线时的优先级（用户未指定或指定分支不存在时） */
+export const BASELINE_CANDIDATES = [
+  "origin/stable",
+  "origin/dev",
+  "origin/main",
+  "origin/master",
+] as const;
+
+export function normalizeRemoteBaseline(branch: string): string {
+  const trimmed = branch.trim();
+  if (!trimmed || trimmed === "auto") return "";
+  return trimmed.startsWith("origin/") ? trimmed : `origin/${trimmed}`;
+}
+
+export function remoteRefExists(repoRoot: string, ref: string): boolean {
+  try {
+    execGit(repoRoot, ["rev-parse", "--verify", `${ref}^{commit}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 解析有效基线：优先使用配置/环境变量；不存在则按 stable → dev → main → master 回退。
+ */
+export function resolveEffectiveBaseline(
+  repoRoot: string,
+  configured?: string
+): { baseline: string | null; tried: string[] } {
+  const tried: string[] = [];
+  const ordered: string[] = [];
+  const normalized = normalizeRemoteBaseline(configured ?? "auto");
+
+  if (normalized) {
+    ordered.push(normalized);
+  }
+  for (const c of BASELINE_CANDIDATES) {
+    if (!ordered.includes(c)) ordered.push(c);
+  }
+
+  for (const ref of ordered) {
+    tried.push(ref);
+    if (remoteRefExists(repoRoot, ref)) {
+      return { baseline: ref, tried };
+    }
+  }
+  return { baseline: null, tried };
+}
+
+export function getMergeBase(repoRoot: string, baseline: string = "origin/main"): string | null {
   try {
     return execGit(repoRoot, ["merge-base", "HEAD", baseline]);
   } catch {
@@ -31,7 +81,7 @@ export function getMergeBase(repoRoot: string, baseline: string = "origin/stable
   }
 }
 
-export function buildGitContext(repoRoot: string, baseline: string = "origin/stable"): GitContext {
+export function buildGitContext(repoRoot: string, baseline: string = "origin/main"): GitContext {
   const mergeBase = getMergeBase(repoRoot, baseline);
   if (!mergeBase) {
     return {

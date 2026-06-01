@@ -1,12 +1,11 @@
 import * as fs from "fs";
 import * as path from "path";
+import { resolveEffectiveBaseline } from "./git";
 
 export interface PrePushReviewConfig {
   enabled: boolean;
   baseline: string;
   agent: "cursor" | "claude";
-  rebaseEnabled: boolean;
-  rebaseBranch: string;
   timeoutMs: number;
 }
 
@@ -14,10 +13,8 @@ export const CONFIG_REL_PATH = ".cursor/pre-push-review.json";
 
 const DEFAULTS: PrePushReviewConfig = {
   enabled: false,
-  baseline: "origin/stable",
+  baseline: "auto",
   agent: "cursor",
-  rebaseEnabled: false,
-  rebaseBranch: "origin/main",
   timeoutMs: 900000,
 };
 
@@ -31,8 +28,9 @@ export function loadConfigFile(repoRoot: string): PrePushReviewConfig | null {
   try {
     const raw = JSON.parse(fs.readFileSync(filePath, "utf8")) as Partial<PrePushReviewConfig>;
     return { ...DEFAULTS, ...raw };
-  } catch {
-    return null;
+  } catch (e) {
+    console.error(`[cursor-pre-push] 无法解析 ${filePath}，将使用默认配置:`, e);
+    return { ...DEFAULTS };
   }
 }
 
@@ -61,12 +59,14 @@ export function resolveRuntimeConfig(repoRoot: string): PrePushReviewConfig {
     if (["false", "0", "no", "off"].includes(v)) enabled = false;
   }
 
+  const baselineInput =
+    process.env.CURSOR_PRE_PUSH_BASELINE?.trim() || fromFile.baseline;
+  const { baseline: resolvedBaseline } = resolveEffectiveBaseline(repoRoot, baselineInput);
+
   return {
     enabled,
-    baseline: process.env.CURSOR_PRE_PUSH_BASELINE?.trim() || fromFile.baseline,
+    baseline: resolvedBaseline ?? baselineInput,
     agent,
-    rebaseEnabled: fromFile.rebaseEnabled,
-    rebaseBranch: fromFile.rebaseBranch,
     timeoutMs: Number(process.env.CURSOR_PRE_PUSH_TIMEOUT_MS) || fromFile.timeoutMs,
   };
 }

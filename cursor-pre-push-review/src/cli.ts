@@ -25,8 +25,8 @@ function isDeletePushFromStdin(): boolean {
 
 function printUsage(): void {
   console.log(`Usage:
-  cursor-pre-push run      # pre-push：按 .cursor/pre-push-review.json 执行（含可选 rebase）
-  cursor-pre-push review   # 仅审查当前分支，不 rebase
+  cursor-pre-push run      # pre-push hook：按 .cursor/pre-push-review.json 执行审查
+  cursor-pre-push review   # 手动审查当前分支（不经过 push）
 `);
 }
 
@@ -38,18 +38,17 @@ if (require.main === module) {
   }
 
   if (isDeletePushFromStdin()) {
-    console.log("[cursor-pre-push] 检测到 delete push，跳过 rebase 与审查");
+    console.log("[cursor-pre-push] 检测到 delete push，跳过审查");
     process.exit(0);
   }
 
-  const reviewOnly = cmd === "review";
   if (cmd !== "run" && cmd !== "review") {
     console.error(`[cursor-pre-push] 未知命令: ${cmd}`);
     printUsage();
     process.exit(1);
   }
 
-  const result = runReview(process.cwd(), { reviewOnly });
+  const result = runReview(process.cwd());
   if (!result.ok) {
     process.exit(1);
   }

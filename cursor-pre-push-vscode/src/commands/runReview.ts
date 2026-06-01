@@ -2,6 +2,10 @@ import * as vscode from "vscode";
 import { SettingsProvider } from "../settings/settingsProvider";
 import { HookInstaller } from "../infrastructure/hookInstaller";
 import { runCliReview } from "../infrastructure/cliRunner";
+import {
+  ensureDependencies,
+  notifyDependencyIssues,
+} from "../infrastructure/dependencyInstaller";
 
 export function registerRunReviewCommand(
   context: vscode.ExtensionContext,
@@ -10,6 +14,12 @@ export function registerRunReviewCommand(
 ): void {
   context.subscriptions.push(
     vscode.commands.registerCommand("cursor.prePush.runReview", async () => {
+      const deps = await ensureDependencies(context);
+      if (!deps.reviewCli || !deps.agent) {
+        notifyDependencyIssues(deps);
+        return;
+      }
+
       let forceEnabled = settingsProvider.enabled;
       if (!forceEnabled) {
         const choice = await vscode.window.showWarningMessage(
@@ -32,7 +42,7 @@ export function registerRunReviewCommand(
       await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
-          title: "正在执行 Pre-push 审查（不 rebase）...",
+          title: "正在执行 Pre-push 审查...",
           cancellable: false,
         },
         async () => {

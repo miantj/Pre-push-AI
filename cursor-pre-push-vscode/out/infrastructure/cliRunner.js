@@ -36,21 +36,26 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.runCliReview = runCliReview;
 const vscode = __importStar(require("vscode"));
 const child_process_1 = require("child_process");
-const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
+const runtimePaths_1 = require("./runtimePaths");
 async function runCliReview(settingsProvider, extensionPath, options = {}) {
-    const cliPath = path.join(extensionPath, "node_modules", "cursor-pre-push-review", "dist", "cli.js");
+    const cliPath = (0, runtimePaths_1.getBundledReviewCliPath)(extensionPath);
     if (!fs.existsSync(cliPath)) {
         vscode.window.showErrorMessage(`未找到 CLI: ${cliPath}`);
+        return false;
+    }
+    const cwd = settingsProvider.workspaceRoot;
+    if (!cwd) {
+        vscode.window.showErrorMessage("未打开工作区文件夹，无法执行审查");
         return false;
     }
     const enabled = options.forceEnabled ?? settingsProvider.enabled;
     const cmd = options.reviewOnly ? "review" : "run";
     return new Promise((resolve) => {
         const proc = (0, child_process_1.spawn)(process.execPath, [cliPath, cmd], {
-            cwd: settingsProvider.workspaceRoot,
+            cwd,
             env: {
-                ...process.env,
+                ...(0, runtimePaths_1.augmentedPathEnv)(),
                 ELECTRON_RUN_AS_NODE: "1",
                 USE_AI_REVIEW_ON_PRE_PUSH_HOOK: enabled ? "true" : "false",
                 CURSOR_PRE_PUSH_BASELINE: settingsProvider.baseline,

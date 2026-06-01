@@ -1,0 +1,16 @@
+.vscode/**
+.vscode-test/**
+src/**
+**/*.ts
+!node_modules/**/*.ts
+**/*.map
+.gitignore
+.yarnrc
+*.vsix
+logo.svg
+**/.DS_Store
+**/node_modules/typescript/**
+**/node_modules/@types/**
+**/node_modules/dotenv/README*.md
+**/node_modules/dotenv/CHANGELOG.md
+**/node_modules/dotenv/SECURITY.md

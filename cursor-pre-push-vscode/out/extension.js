@@ -40,9 +40,11 @@ const enable_1 = require("./commands/enable");
 const disable_1 = require("./commands/disable");
 const runReview_1 = require("./commands/runReview");
 const openReport_1 = require("./commands/openReport");
+const installDeps_1 = require("./commands/installDeps");
 const settingsProvider_1 = require("./settings/settingsProvider");
 const hookInstaller_1 = require("./infrastructure/hookInstaller");
 const statusBar_1 = require("./infrastructure/statusBar");
+const dependencyInstaller_1 = require("./infrastructure/dependencyInstaller");
 function activate(context) {
     const settingsProvider = new settingsProvider_1.SettingsProvider();
     const hookInstaller = new hookInstaller_1.HookInstaller(context);
@@ -50,6 +52,16 @@ function activate(context) {
     (0, disable_1.registerDisableCommand)(context, settingsProvider, hookInstaller);
     (0, runReview_1.registerRunReviewCommand)(context, settingsProvider, hookInstaller);
     (0, openReport_1.registerOpenReportCommand)(context);
+    (0, installDeps_1.registerInstallDepsCommand)(context);
+    void (0, dependencyInstaller_1.ensureDependencies)(context, { silent: true }).then((status) => {
+        if (!status.reviewCli) {
+            (0, dependencyInstaller_1.notifyDependencyIssues)(status);
+            return;
+        }
+        if (!status.agent) {
+            (0, dependencyInstaller_1.notifyDependencyIssues)(status);
+        }
+    });
     (0, statusBar_1.updateStatusBar)(settingsProvider, hookInstaller);
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
         if (!e.affectsConfiguration("cursorPrePush"))

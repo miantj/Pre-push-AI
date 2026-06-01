@@ -3,22 +3,23 @@ import { spawn } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
 import { SettingsProvider } from "../settings/settingsProvider";
+import { augmentedPathEnv, getBundledReviewCliPath } from "./runtimePaths";
 
 export async function runCliReview(
   settingsProvider: SettingsProvider,
   extensionPath: string,
   options: { reviewOnly?: boolean; forceEnabled?: boolean } = {}
 ): Promise<boolean> {
-  const cliPath = path.join(
-    extensionPath,
-    "node_modules",
-    "cursor-pre-push-review",
-    "dist",
-    "cli.js"
-  );
+  const cliPath = getBundledReviewCliPath(extensionPath);
 
   if (!fs.existsSync(cliPath)) {
     vscode.window.showErrorMessage(`未找到 CLI: ${cliPath}`);
+    return false;
+  }
+
+  const cwd = settingsProvider.workspaceRoot;
+  if (!cwd) {
+    vscode.window.showErrorMessage("未打开工作区文件夹，无法执行审查");
     return false;
   }
 
@@ -27,9 +28,9 @@ export async function runCliReview(
 
   return new Promise((resolve) => {
     const proc = spawn(process.execPath, [cliPath, cmd], {
-      cwd: settingsProvider.workspaceRoot,
+      cwd,
       env: {
-        ...process.env,
+        ...augmentedPathEnv(),
         ELECTRON_RUN_AS_NODE: "1",
         USE_AI_REVIEW_ON_PRE_PUSH_HOOK: enabled ? "true" : "false",
         CURSOR_PRE_PUSH_BASELINE: settingsProvider.baseline,

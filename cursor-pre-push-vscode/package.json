@@ -4,6 +4,12 @@
   "description": "AI-powered pre-push code review for Cursor",
   "version": "1.0.0",
   "publisher": "YOUR-PUBLISHER-ID",
+  "icon": "resources/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOUR-ORG/cursor-pre-push-vscode"
+  },
+  "license": "MIT",
   "engines": {
     "vscode": "^1.88.0"
   },
@@ -11,7 +17,7 @@
     "Developer",
     "Linters"
   ],
-  "activationEvents": [],
+  "activationEvents": ["onStartupFinished"],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
@@ -25,11 +31,15 @@
       },
       {
         "command": "cursor.prePush.runReview",
-        "title": "立即审查当前分支（不 rebase）"
+        "title": "立即审查当前分支"
       },
       {
         "command": "cursor.prePush.openReport",
         "title": "查看上次审查报告"
+      },
+      {
+        "command": "cursor.prePush.installDeps",
+        "title": "安装 Pre-push 依赖（Cursor Agent CLI）"
       }
     ],
     "configuration": {
@@ -42,8 +52,8 @@
         },
         "cursorPrePush.baseline": {
           "type": "string",
-          "default": "origin/stable",
-          "description": "diff 对比基线分支"
+          "default": "auto",
+          "description": "diff 对比基线；auto 时按 origin/stable → dev → main → master 自动选择"
         },
         "cursorPrePush.agent": {
           "type": "string",
@@ -54,35 +64,29 @@
           ],
           "description": "审查后端"
         },
-        "cursorPrePush.rebaseEnabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "push 前是否执行 rebase"
-        },
-        "cursorPrePush.rebaseBranch": {
-          "type": "string",
-          "default": "origin/main",
-          "description": "rebase 目标分支"
-        },
         "cursorPrePush.timeoutMs": {
           "type": "number",
           "default": 900000,
           "description": "审查超时毫秒"
+        },
+        "cursorPrePush.autoInstallDependencies": {
+          "type": "boolean",
+          "default": true,
+          "description": "扩展启动时自动安装 Cursor Agent CLI（审查引擎已内置在 VSIX 中）"
         }
       }
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run compile && npm run bundle:review",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "bundle:review": "cd ../cursor-pre-push-review && npm run build && cd ../cursor-pre-push-vscode && rm -rf node_modules/cursor-pre-push-review && mkdir -p node_modules/cursor-pre-push-review && cp -R ../cursor-pre-push-review/dist ../cursor-pre-push-review/bin ../cursor-pre-push-review/package.json node_modules/cursor-pre-push-review/ && npm install --prefix node_modules/cursor-pre-push-review --omit=dev"
   },
   "devDependencies": {
     "@types/node": "^20.19.41",
-    "@types/vscode": "^1.120.0",
+    "@types/vscode": "^1.88.0",
     "typescript": "^5.9.3"
   },
-  "dependencies": {
-    "cursor-pre-push-review": "file:../cursor-pre-push-review"
-  }
+  "dependencies": {}
 }

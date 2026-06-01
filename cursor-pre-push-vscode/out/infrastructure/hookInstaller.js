@@ -38,6 +38,7 @@ const vscode = __importStar(require("vscode"));
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const child_process_1 = require("child_process");
+const runtimePaths_1 = require("./runtimePaths");
 const HOOK_START = "# >>> cursor-pre-push-review";
 const HOOK_END = "# <<< cursor-pre-push-review";
 class HookInstaller {
@@ -79,7 +80,7 @@ class HookInstaller {
         }
     }
     get cliPath() {
-        return path.join(this.context.extensionPath, "node_modules", "cursor-pre-push-review", "dist", "cli.js");
+        return (0, runtimePaths_1.getBundledReviewCliPath)(this.context.extensionPath);
     }
     resolveNodeForHook() {
         try {
@@ -227,6 +228,7 @@ class HookInstaller {
         const electronPrefix = useElectron ? "ELECTRON_RUN_AS_NODE=1 \\\n" : "";
         return [
             HOOK_START,
+            'export PATH="$HOME/.local/bin:$PATH"',
             electronPrefix + `${this.shellQuote(bin)} ${this.shellQuote(this.cliPath)} run || exit 1`,
             HOOK_END,
         ].join("\n");

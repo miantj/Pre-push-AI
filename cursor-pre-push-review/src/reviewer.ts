@@ -1,7 +1,9 @@
 import { spawnSync } from "child_process";
-import { resolveRuntimeConfig, shouldRunReview } from "./config";
-import { buildGitContext, parsePositiveInt } from "./git";
-import { getCurrentBranch, findGitRepoRoot } from "./repo";
+import * as os from "os";
+import * as path from "path";
+import { PrePushReviewConfig, resolveRuntimeConfig, shouldRunReview } from "./config";
+import { buildGitContext, parsePositiveInt, resolveEffectiveBaseline } from "./git";
+import { findGitRepoRoot } from "./repo";
 import { parseReviewVerdict } from "./verdict";
 import {
   emitReviewFailureBlock,
@@ -64,25 +66,49 @@ Do not add any text after that line. The automation will **block git push** when
 
 `;
 
+function augmentedPathEnv(): NodeJS.ProcessEnv {
+  const localBin = path.join(os.homedir(), ".local", "bin");
+  const pathKey = process.platform === "win32" ? "Path" : "PATH";
+  const current = process.env[pathKey] ?? "";
+  if (current.split(path.delimiter).includes(localBin)) {
+    return { ...process.env };
+  }
+  return { ...process.env, [pathKey]: `${localBin}${path.delimiter}${current}` };
+}
+
 function resolveBin(envKey: string, commandName: string): string {
   const fromEnv = process.env[envKey];
   if (fromEnv != null && String(fromEnv).trim() !== "") {
     return String(fromEnv).trim();
   }
+  if (commandName === "agent") {
+    const localAgent = path.join(os.homedir(), ".local", "bin", "agent");
+    try {
+      const fs = require("fs") as typeof import("fs");
+      if (fs.existsSync(localAgent)) return localAgent;
+    } catch {
+      // ignore
+    }
+  }
   try {
-    const { execSync } = require("child_process");
-    return execSync(`command -v ${commandName}`, { encoding: "utf8" }).trim();
+    const { execFileSync } = require("child_process");
+    return execFileSync("bash", ["-lc", `command -v ${commandName}`], {
+      encoding: "utf8",
+      env: augmentedPathEnv(),
+    }).trim();
   } catch {
     return "";
   }
 }
 
-function resolveBugReviewBackend(): "cursor" | "claude" {
+function resolveBugReviewBackend(config: PrePushReviewConfig): "cursor" | "claude" {
   const raw = process.env.AI_REVIEW_AGENT;
-  if (raw == null || String(raw).trim() === "") return "cursor";
-  const v = String(raw).trim().toLowerCase();
-  if (v === "claude" || v === "claude-code") return "claude";
-  return "cursor";
+  if (raw != null && String(raw).trim() !== "") {
+    const v = String(raw).trim().toLowerCase();
+    if (v === "claude" || v === "claude-code") return "claude";
+    return "cursor";
+  }
+  return config.agent;
 }
 
 function buildCursorAgentArgv(repoRoot: string, prompt: string): string[] {
@@ -115,16 +141,6 @@ function buildClaudeCodeArgv(): string[] {
     argv.push("--model", String(model).trim());
   }
   return argv;
-}
-
-function normalizeRemoteBranch(branch: string): string {
-  const trimmed = branch.trim();
-  if (!trimmed) return "origin/main";
-  return trimmed.startsWith("origin/") ? trimmed : `origin/${trimmed}`;
-}
-
-function getFetchBranchRef(branch: string): string {
-  return normalizeRemoteBranch(branch).replace(/^origin\//, "");
 }
 
 function describeCliSpawnFailure(
@@ -169,12 +185,7 @@ export interface ReviewResult {
   reason?: string;
 }
 
-export interface RunReviewOptions {
-  /** 仅审查，不 rebase（IDE「立即审查」） */
-  reviewOnly?: boolean;
-}
-
-export function runReview(startDir: string, options: RunReviewOptions = {}): ReviewResult {
+export function runReview(startDir: string): ReviewResult {
   const repoRoot = findGitRepoRoot(startDir);
   const config = resolveRuntimeConfig(repoRoot);
 
@@ -185,32 +196,22 @@ export function runReview(startDir: string, options: RunReviewOptions = {}): Rev
     return { ok: true, skipped: true, reason: "disabled" };
   }
 
-  const withRebase = !options.reviewOnly && config.rebaseEnabled;
-  const rebaseBranch = config.rebaseBranch;
-
-  if (withRebase && rebaseBranch) {
-    const branch = getCurrentBranch(repoRoot);
-    const mainName = normalizeRemoteBranch(rebaseBranch).replace(/^origin\//, "");
-    if (branch === "main" || branch === mainName) {
-      console.log(`[cursor-pre-push] 当前在 ${branch} 分支，跳过 rebase`);
-    } else {
-      const remoteBranch = normalizeRemoteBranch(rebaseBranch);
-      const fetchRef = getFetchBranchRef(rebaseBranch);
-      console.log(
-        `[cursor-pre-push] 执行 git fetch origin ${fetchRef} && git rebase ${remoteBranch}`
-      );
-      try {
-        const { execSync } = require("child_process");
-        execSync(`git fetch origin ${fetchRef}`, { cwd: repoRoot, stdio: "inherit" });
-        execSync(`git rebase ${remoteBranch}`, { cwd: repoRoot, stdio: "inherit" });
-      } catch (e) {
-        console.error(`[cursor-pre-push] rebase 失败: ${e}`);
-        return { ok: false, reason: "rebase failed" };
-      }
-    }
+  const configuredBaseline = config.baseline;
+  const { baseline, tried } = resolveEffectiveBaseline(repoRoot, configuredBaseline);
+  if (!baseline) {
+    console.error(
+      `[cursor-pre-push] 未找到可用基线分支，已尝试：${tried.join("、")}。请先 git fetch origin`
+    );
+    return { ok: false, reason: "baseline not found" };
+  }
+  if (configuredBaseline.trim() !== "auto" && configuredBaseline !== baseline) {
+    console.log(
+      `[cursor-pre-push] 配置基线 ${configuredBaseline} 不可用，已改用 ${baseline}`
+    );
+  } else if (configuredBaseline.trim() === "auto" || !configuredBaseline.trim()) {
+    console.log(`[cursor-pre-push] 自动选择基线分支：${baseline}`);
   }
 
-  const baseline = config.baseline;
   maybeFetchBaseline(repoRoot, baseline);
 
   const ctx = buildGitContext(repoRoot, baseline);
@@ -236,7 +237,7 @@ export function runReview(startDir: string, options: RunReviewOptions = {}): Rev
     ctx.text,
   ].join("\n");
 
-  const backend = resolveBugReviewBackend();
+  const backend = resolveBugReviewBackend(config);
   let bin: string;
   let argv: string[];
   let backendLabel: string;
@@ -283,7 +284,7 @@ export function runReview(startDir: string, options: RunReviewOptions = {}): Rev
   } = {
     cwd: repoRoot,
     encoding: "utf8",
-    env: { ...process.env },
+    env: augmentedPathEnv(),
     timeout: timeoutMs,
     maxBuffer: 50 * 1024 * 1024,
   };

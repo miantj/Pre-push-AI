@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { execFileSync } from "child_process";
 import { SettingsProvider } from "../settings/settingsProvider";
+import { getBundledReviewCliPath } from "./runtimePaths";
 
 const HOOK_START = "# >>> cursor-pre-push-review";
 const HOOK_END = "# <<< cursor-pre-push-review";
@@ -49,13 +50,7 @@ export class HookInstaller {
   }
 
   private get cliPath(): string {
-    return path.join(
-      this.context.extensionPath,
-      "node_modules",
-      "cursor-pre-push-review",
-      "dist",
-      "cli.js"
-    );
+    return getBundledReviewCliPath(this.context.extensionPath);
   }
 
   private resolveNodeForHook(): { bin: string; useElectron: boolean } {
@@ -234,6 +229,7 @@ export class HookInstaller {
 
     return [
       HOOK_START,
+      'export PATH="$HOME/.local/bin:$PATH"',
       electronPrefix + `${this.shellQuote(bin)} ${this.shellQuote(this.cliPath)} run || exit 1`,
       HOOK_END,
     ].join("\n");

@@ -36,8 +36,14 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.registerRunReviewCommand = registerRunReviewCommand;
 const vscode = __importStar(require("vscode"));
 const cliRunner_1 = require("../infrastructure/cliRunner");
+const dependencyInstaller_1 = require("../infrastructure/dependencyInstaller");
 function registerRunReviewCommand(context, settingsProvider, hookInstaller) {
     context.subscriptions.push(vscode.commands.registerCommand("cursor.prePush.runReview", async () => {
+        const deps = await (0, dependencyInstaller_1.ensureDependencies)(context);
+        if (!deps.reviewCli || !deps.agent) {
+            (0, dependencyInstaller_1.notifyDependencyIssues)(deps);
+            return;
+        }
         let forceEnabled = settingsProvider.enabled;
         if (!forceEnabled) {
             const choice = await vscode.window.showWarningMessage("Pre-push 审查未启用，是否立即启用？", "启用并审查", "仅本次审查", "取消");
@@ -56,7 +62,7 @@ function registerRunReviewCommand(context, settingsProvider, hookInstaller) {
         }
         await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
-            title: "正在执行 Pre-push 审查（不 rebase）...",
+            title: "正在执行 Pre-push 审查...",
             cancellable: false,
         }, async () => {
             const result = await (0, cliRunner_1.runCliReview)(settingsProvider, context.extensionPath, {
