@@ -5,7 +5,24 @@ export interface GitContext {
   text: string;
   mergeBase?: string;
   isEmpty?: boolean;
+  /** 完整 diff 是否因 prompt 字符上限被截断 */
+  truncated?: boolean;
+  /** git diff 命令失败（如超过 maxBuffer），不能当作空 diff */
+  diffLoadFailed?: boolean;
 }
+
+export type TryExecGitResult = { ok: true; text: string } | { ok: false };
+
+export function tryExecGit(repoRoot: string, args: string[]): TryExecGitResult {
+  try {
+    return { ok: true, text: execGit(repoRoot, args) };
+  } catch {
+    return { ok: false };
+  }
+}
+
+const GIT_DIFF_UNAVAILABLE =
+  "(unavailable — git diff failed or output exceeded maxBuffer; use batched per-file diffs instead)";
 
 export function execGit(repoRoot: string, args: string[]): string {
   return execFileSync("git", args, {
@@ -81,6 +98,99 @@ export function getMergeBase(repoRoot: string, baseline: string = "origin/main")
   }
 }
 
+export function getMaxDiffChars(): number {
+  return parsePositiveInt(process.env.CURSOR_PRE_PUSH_MAX_DIFF_CHARS, 120000);
+}
+
+export function getChangedFiles(repoRoot: string, mergeBase: string): string[] {
+  const result = tryExecGit(repoRoot, ["diff", "--name-only", `${mergeBase}..HEAD`]);
+  if (!result.ok) return [];
+  return result.text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+export function getFileDiffCharCount(
+  repoRoot: string,
+  mergeBase: string,
+  filePath: string
+): number {
+  const result = tryExecGit(repoRoot, ["diff", `${mergeBase}..HEAD`, "--", filePath]);
+  if (!result.ok) return Number.MAX_SAFE_INTEGER;
+  return result.text.length;
+}
+
+/**
+ * 按 diff 体量将变更文件拆成多批，保证每批完整 diff 不超过 maxCharsPerBatch。
+ */
+export function splitFilesIntoBatches(
+  repoRoot: string,
+  mergeBase: string,
+  files: string[],
+  maxCharsPerBatch: number
+): string[][] {
+  if (!files.length) return [];
+  const batches: string[][] = [];
+  let current: string[] = [];
+  let currentSize = 0;
+
+  for (const file of files) {
+    const size = getFileDiffCharCount(repoRoot, mergeBase, file);
+    if (current.length > 0 && currentSize + size > maxCharsPerBatch) {
+      batches.push(current);
+      current = [];
+      currentSize = 0;
+    }
+    current.push(file);
+    currentSize += size;
+  }
+  if (current.length) batches.push(current);
+  return batches;
+}
+
+function formatGitContextText(
+  baseline: string,
+  mergeBase: string,
+  logText: string,
+  statText: string,
+  diffText: string,
+  maxDiff: number,
+  batchNote?: string,
+  diffLoadFailed?: boolean
+): { text: string; truncated: boolean } {
+  const truncated = !diffLoadFailed && diffText.length > maxDiff;
+  const truncatedDiff = diffLoadFailed
+    ? GIT_DIFF_UNAVAILABLE
+    : truncated
+      ? diffText.slice(0, maxDiff) + `\n\n[... truncated, original ${diffText.length} chars]`
+      : diffText;
+
+  const parts = [
+    "### Review baseline (vs stable)",
+    `Range **merge-base(HEAD, ${baseline})..HEAD** = commits and file changes on the current branch relative to **${baseline}**.`,
+  ];
+  if (batchNote) {
+    parts.push("", batchNote);
+  }
+  parts.push(
+    "",
+    "### merge-base",
+    mergeBase,
+    "",
+    "### git log --oneline merge-base..HEAD",
+    logText || "(empty)",
+    "",
+    "### git diff --stat merge-base..HEAD",
+    statText || "(empty)",
+    "",
+    "### git diff merge-base..HEAD",
+    truncatedDiff
+  );
+
+  return { text: parts.join("\n"), truncated };
+}
+
 export function buildGitContext(repoRoot: string, baseline: string = "origin/main"): GitContext {
   const mergeBase = getMergeBase(repoRoot, baseline);
   if (!mergeBase) {
@@ -90,40 +200,83 @@ export function buildGitContext(repoRoot: string, baseline: string = "origin/mai
     };
   }
 
-  const logText = safeExecGit(repoRoot, ["log", "--oneline", `${mergeBase}..HEAD`], "(empty)");
-  const statText = safeExecGit(repoRoot, ["diff", "--stat", `${mergeBase}..HEAD`], "(empty)");
-  const diffText = safeExecGit(repoRoot, ["diff", `${mergeBase}..HEAD`], "(empty)");
+  const changedFiles = getChangedFiles(repoRoot, mergeBase);
+  const logResult = tryExecGit(repoRoot, ["log", "--oneline", `${mergeBase}..HEAD`]);
+  const statResult = tryExecGit(repoRoot, ["diff", "--stat", `${mergeBase}..HEAD`]);
+  const diffResult = tryExecGit(repoRoot, ["diff", `${mergeBase}..HEAD`]);
 
-  const maxDiff = parseInt(process.env.CURSOR_PRE_PUSH_MAX_DIFF_CHARS || "120000", 10);
-  const truncatedDiff = diffText.length > maxDiff
-    ? diffText.slice(0, maxDiff) + `\n\n[... truncated, original ${diffText.length} chars]`
-    : diffText;
-
-  const isEmpty =
-    (!logText || logText === "(empty)") &&
-    (!statText || statText === "(empty)") &&
-    (!diffText || diffText === "(empty)");
+  const logText = logResult.ok ? logResult.text : "(empty)";
+  const statText = statResult.ok ? statResult.text : "(empty)";
+  const diffText = diffResult.ok ? diffResult.text : "";
+  const diffLoadFailed = !diffResult.ok;
+  const maxDiff = getMaxDiffChars();
+  const { text, truncated } = formatGitContextText(
+    baseline,
+    mergeBase,
+    logText,
+    statText,
+    diffText,
+    maxDiff,
+    undefined,
+    diffLoadFailed
+  );
 
   return {
     ok: true,
     mergeBase,
-    isEmpty,
-    text: [
-      "### Review baseline (vs stable)",
-      `Range **merge-base(HEAD, ${baseline})..HEAD** = commits and file changes on the current branch relative to **${baseline}**.`,
-      "",
-      "### merge-base",
-      mergeBase,
-      "",
-      "### git log --oneline merge-base..HEAD",
-      logText || "(empty)",
-      "",
-      "### git diff --stat merge-base..HEAD",
-      statText || "(empty)",
-      "",
-      "### git diff merge-base..HEAD",
-      truncatedDiff,
-    ].join("\n"),
+    isEmpty: changedFiles.length === 0,
+    truncated,
+    diffLoadFailed,
+    text,
+  };
+}
+
+/** 仅包含指定文件的 diff 上下文（用于分批 exhaustive 审查）。 */
+export function buildGitContextForFiles(
+  repoRoot: string,
+  baseline: string,
+  mergeBase: string,
+  files: string[],
+  batchIndex: number,
+  batchTotal: number
+): GitContext {
+  const logResult = tryExecGit(repoRoot, ["log", "--oneline", `${mergeBase}..HEAD`]);
+  const logText = logResult.ok ? logResult.text : "(empty)";
+  const statResult = tryExecGit(
+    repoRoot,
+    ["diff", "--stat", `${mergeBase}..HEAD`, "--", ...files]
+  );
+  const diffResult = tryExecGit(
+    repoRoot,
+    ["diff", `${mergeBase}..HEAD`, "--", ...files]
+  );
+  const statText = statResult.ok ? statResult.text : "(empty)";
+  const diffText = diffResult.ok ? diffResult.text : "";
+  const diffLoadFailed = !diffResult.ok;
+  const maxDiff = getMaxDiffChars();
+  const batchNote = [
+    `### Batch scope (${batchIndex}/${batchTotal})`,
+    `Review **only** these changed paths in this batch: ${files.join(", ")}`,
+    "Report **all** in-scope critical/high issues in this batch before the verdict line.",
+  ].join("\n");
+  const { text, truncated } = formatGitContextText(
+    baseline,
+    mergeBase,
+    logText,
+    statText,
+    diffText,
+    maxDiff,
+    batchNote,
+    diffLoadFailed
+  );
+
+  return {
+    ok: true,
+    mergeBase,
+    isEmpty: files.length === 0,
+    truncated,
+    diffLoadFailed,
+    text,
   };
 }
 

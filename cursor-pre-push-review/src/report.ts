@@ -33,11 +33,12 @@ function clipParagraph(s: string, max: number): string {
   return `${t.slice(0, max).trim()}\n…（已截断，完整内容见下方「Agent 原始输出」）`;
 }
 
+/** 子节结束：下一标题 / 分隔 / 结论行 / 字符串末尾（不用 `$`，避免 multiline 下误匹配行尾） */
+const SUBSECTION_END =
+  "(?=\\n###\\s|\\n##\\s|\\n\\*{3,}\\s*\\n|\\n-{3,}\\s*\\n|^PRE_PUSH_REVIEW_VERDICT|(?![\\s\\S]))";
+
 function extractSubsection(text: string, h3Pattern: string): string {
-  const re = new RegExp(
-    `${h3Pattern}\\s*\\n+([\\s\\S]*?)(?=\\n###\\s|\\n##\\s|\\n\\*{3,}\\s*\\n|\\n-{3,}\\s*\\n|^PRE_PUSH_REVIEW_VERDICT)`,
-    "im"
-  );
+  const re = new RegExp(`${h3Pattern}\\s*\\n+([\\s\\S]*?)${SUBSECTION_END}`, "im");
   const m = text.match(re);
   return m ? m[1].trim() : "";
 }
@@ -48,6 +49,46 @@ function extractSubsectionFirst(text: string, h3Patterns: string[]): string {
     if (s) return s;
   }
   return "";
+}
+
+function extractAllSubsections(text: string, h3Pattern: string): string[] {
+  const re = new RegExp(`${h3Pattern}\\s*\\n+([\\s\\S]*?)${SUBSECTION_END}`, "gim");
+  const out: string[] = [];
+  for (const m of text.matchAll(re)) {
+    const s = m[1]?.trim();
+    if (s) out.push(s);
+  }
+  return out;
+}
+
+function extractIssueBlocks(text: string): string[] {
+  const re =
+    /###\s*Issue\s+\d+[^\n]*\n+([\s\S]*?)(?=\n###\s*Issue\s+\d+|\n##\s|\n\*{3,}\s*\n|\n-{3,}\s*\n|^PRE_PUSH_REVIEW_VERDICT)/gim;
+  const out: string[] = [];
+  for (const m of text.matchAll(re)) {
+    const s = m[1]?.trim();
+    if (s) out.push(s);
+  }
+  return out;
+}
+
+function formatFindingBlock(index: number, body: string): string {
+  const bugImpact = extractSubsection(body, "###\\s*Bug\\s*&\\s*impact");
+  const intent = extractSubsection(body, "###\\s*Intent\\s+vs\\s+code");
+  const root = extractSubsectionFirst(body, ["###\\s*Root cause[^\\n]*", "###\\s*根因[^\\n]*"]);
+  const fix = extractSubsectionFirst(body, ["###\\s*Minimal fix[^\\n]*", "###\\s*最小修复[^\\n]*"]);
+  const validate = extractSubsectionFirst(body, ["###\\s*Validate[^\\n]*", "###\\s*验证[^\\n]*"]);
+
+  const chunks: string[] = [`【问题 ${index}】`];
+  if (bugImpact) chunks.push(`■ 影响（Bug & impact）\n${clipParagraph(bugImpact, 720)}`);
+  if (intent) chunks.push(`■ 意图 vs 代码\n${clipParagraph(intent, 520)}`);
+  if (root) chunks.push(`■ 根因（路径 / 改动点）\n${clipParagraph(root, 920)}`);
+  if (fix) chunks.push(`■ 建议修复\n${clipParagraph(fix, 620)}`);
+  if (validate) chunks.push(`■ 如何验证\n${clipParagraph(validate, 620)}`);
+  if (chunks.length === 1) {
+    chunks.push(`■ 详情\n${clipParagraph(body, 1200)}`);
+  }
+  return chunks.join("\n\n");
 }
 
 export function buildQuickSummary(combined: string, verdict: Verdict, baseline: string): string {
@@ -75,6 +116,21 @@ export function buildQuickSummary(combined: string, verdict: Verdict, baseline: 
       "未能解析 PRE_PUSH_REVIEW_VERDICT。",
       "输出末尾需要单独一行：`PRE_PUSH_REVIEW_VERDICT: PASS` 或 `PRE_PUSH_REVIEW_VERDICT: FAIL`。",
     ].join("\n");
+  }
+
+  const issueBlocks = extractIssueBlocks(raw);
+  if (issueBlocks.length > 0) {
+    return issueBlocks.map((block, i) => formatFindingBlock(i + 1, block)).join("\n\n");
+  }
+
+  const bugImpacts = extractAllSubsections(raw, "###\\s*Bug\\s*&\\s*impact");
+  if (bugImpacts.length > 1) {
+    return bugImpacts
+      .map((bugImpact, i) => {
+        const body = `### Bug & impact\n${bugImpact}`;
+        return formatFindingBlock(i + 1, body);
+      })
+      .join("\n\n");
   }
 
   const bugImpact = extractSubsection(raw, "###\\s*Bug\\s*&\\s*impact");
