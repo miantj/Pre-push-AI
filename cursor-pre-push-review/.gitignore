@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build output (tsc → dist/)
+dist/
+
+# Local env & secrets (dotenv / API keys)
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor / temp
+*.swp
+*.swo
+*~

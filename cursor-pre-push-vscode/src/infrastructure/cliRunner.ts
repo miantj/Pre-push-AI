@@ -1,14 +1,23 @@
 import * as vscode from "vscode";
 import { spawn } from "child_process";
-import * as path from "path";
 import * as fs from "fs";
-import { SettingsProvider } from "../settings/settingsProvider";
+import { ReviewScope, SettingsProvider } from "../settings/settingsProvider";
 import { augmentedPathEnv, getBundledReviewCliPath } from "./runtimePaths";
+import { resolveProviderApiKey } from "./enableGuard";
+import { API_KEY_ENV_REL } from "./secrets";
+
+export interface RunCliOptions {
+  reviewOnly?: boolean;
+  forceEnabled?: boolean;
+  scope?: ReviewScope;
+  fromHook?: boolean;
+}
 
 export async function runCliReview(
   settingsProvider: SettingsProvider,
   extensionPath: string,
-  options: { reviewOnly?: boolean; forceEnabled?: boolean } = {}
+  context: vscode.ExtensionContext,
+  options: RunCliOptions = {}
 ): Promise<boolean> {
   const cliPath = getBundledReviewCliPath(extensionPath);
 
@@ -23,21 +32,50 @@ export async function runCliReview(
     return false;
   }
 
-  const enabled = options.forceEnabled ?? settingsProvider.enabled;
+  const runEnabled = options.forceEnabled ?? settingsProvider.enabled;
+
   const cmd = options.reviewOnly ? "review" : "run";
+  const scope = options.scope ?? settingsProvider.defaultScope;
+
+  let apiKey = "";
+  if (settingsProvider.reviewMode === "provider") {
+    apiKey = await resolveProviderApiKey(context, cwd);
+    if (!apiKey) {
+      const choice = await vscode.window.showWarningMessage(
+        `Provider 模式需要 API Key（SecretStorage 或 ${API_KEY_ENV_REL}），是否现在设置？`,
+        "设置 API Key",
+        "取消"
+      );
+      if (choice === "设置 API Key") {
+        await vscode.commands.executeCommand("aiCodeReview.setApiKey");
+      }
+      return false;
+    }
+  }
+
+  const args = [cliPath, cmd, "--scope", scope];
 
   return new Promise((resolve) => {
-    const proc = spawn(process.execPath, [cliPath, cmd], {
-      cwd,
-      env: {
-        ...augmentedPathEnv(),
-        ELECTRON_RUN_AS_NODE: "1",
-        USE_AI_REVIEW_ON_PRE_PUSH_HOOK: enabled ? "true" : "false",
-        CURSOR_PRE_PUSH_BASELINE: settingsProvider.baseline,
-        AI_REVIEW_AGENT: settingsProvider.agent,
-        CURSOR_PRE_PUSH_TIMEOUT_MS: String(settingsProvider.timeoutMs),
-      },
-    });
+    const env: NodeJS.ProcessEnv = {
+      ...augmentedPathEnv(),
+      ELECTRON_RUN_AS_NODE: "1",
+      AI_CODE_REVIEW_ENABLED: runEnabled ? "true" : "false",
+      AI_CODE_REVIEW_MODE: settingsProvider.reviewMode,
+      AI_CODE_REVIEW_AGENT: settingsProvider.agent,
+      AI_CODE_REVIEW_PROVIDER: settingsProvider.providerType,
+      AI_CODE_REVIEW_PROVIDER_MODEL: settingsProvider.providerModel,
+      AI_CODE_REVIEW_PROVIDER_BASE_URL: settingsProvider.providerBaseUrl,
+      AI_CODE_REVIEW_PROVIDER_PATH: settingsProvider.providerPath,
+      AI_CODE_REVIEW_SCOPE: scope,
+      AI_CODE_REVIEW_BASELINE: settingsProvider.baseline,
+      AI_CODE_REVIEW_TIMEOUT_MS: String(settingsProvider.timeoutMs),
+      AI_CODE_REVIEW_FROM_HOOK: options.fromHook ? "1" : "0",
+    };
+    if (apiKey) {
+      env.AI_CODE_REVIEW_API_KEY = apiKey;
+    }
+
+    const proc = spawn(process.execPath, args, { cwd, env });
 
     let output = "";
     proc.stdout?.on("data", (data) => {
@@ -48,16 +86,19 @@ export async function runCliReview(
     });
 
     proc.on("close", (code) => {
+      const verdictFail = /AI_CODE_REVIEW_VERDICT:\s*FAIL\b/m.test(output);
       if (code !== 0) {
-        const reportHint = settingsProvider.workspaceConfigPath
-          ? `.cursor/pre-push-find-bugs-last.md`
-          : "审查报告";
         vscode.window.showErrorMessage(
-          `审查未通过（exit ${code}），请查看 ${reportHint}`
+          `审查未通过（exit ${code}），请查看 .cursor/ai-code-review-last.md`
         );
-        if (output.trim()) {
-          console.error(output);
-        }
+        if (output.trim()) console.error(output);
+        resolve(false);
+        return;
+      }
+      if (verdictFail) {
+        vscode.window.showWarningMessage(
+          "审查结论：FAIL（未阻断 git 操作），请查看报告了解详情"
+        );
         resolve(false);
         return;
       }

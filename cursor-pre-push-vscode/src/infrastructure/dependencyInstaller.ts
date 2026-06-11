@@ -1,7 +1,13 @@
 import * as vscode from "vscode";
 import { execFile } from "child_process";
 import { promisify } from "util";
-import { augmentedPathEnv, isReviewCliPresent, resolveAgentBin } from "./runtimePaths";
+import {
+  AgentCliType,
+  augmentedPathEnv,
+  isReviewCliPresent,
+  resolveAgentBin,
+  resolveAgentCliBin,
+} from "./runtimePaths";
 
 const execFileAsync = promisify(execFile);
 const SETUP_STATE_KEY = "dependencySetupVersion";
@@ -11,10 +17,24 @@ export interface DependencyStatus {
   agent: boolean;
 }
 
-export function getDependencyStatus(extensionPath: string): DependencyStatus {
+export interface DependencyOptions {
+  force?: boolean;
+  silent?: boolean;
+  /** Provider 模式：跳过 Agent CLI 检查与安装 */
+  skipAgent?: boolean;
+  /** Agent 模式下的目标 CLI：cursor → agent，claude → claude */
+  agentType?: AgentCliType;
+}
+
+export function getDependencyStatus(
+  extensionPath: string,
+  options: Pick<DependencyOptions, "skipAgent" | "agentType"> = {}
+): DependencyStatus {
+  const skipAgent = options.skipAgent ?? false;
+  const agentType = options.agentType ?? "cursor";
   return {
     reviewCli: isReviewCliPresent(extensionPath),
-    agent: Boolean(resolveAgentBin()),
+    agent: skipAgent ? true : Boolean(resolveAgentCliBin(agentType)),
   };
 }
 
@@ -42,7 +62,7 @@ async function installCursorAgent(): Promise<boolean> {
       );
     }
   } catch (e) {
-    console.error("[cursor-pre-push-vscode] 安装 Cursor Agent CLI 失败:", e);
+    console.error("[ai-code-review] 安装 Cursor Agent CLI 失败:", e);
     return false;
   }
 
@@ -50,22 +70,25 @@ async function installCursorAgent(): Promise<boolean> {
 }
 
 function shouldAutoInstall(): boolean {
-  return (
-    vscode.workspace.getConfiguration("cursorPrePush").get<boolean>("autoInstallDependencies") ??
-    true
-  );
+  const primary = vscode.workspace
+    .getConfiguration("aiCodeReview")
+    .get<boolean>("autoInstallDependencies");
+  return primary ?? true;
 }
 
 export async function ensureDependencies(
   context: vscode.ExtensionContext,
-  options: { force?: boolean; silent?: boolean } = {}
+  options: DependencyOptions = {}
 ): Promise<DependencyStatus> {
+  const agentType = options.agentType ?? "cursor";
+  const skipAgent = options.skipAgent ?? false;
+
   if (!shouldAutoInstall() && !options.force) {
-    return getDependencyStatus(context.extensionPath);
+    return getDependencyStatus(context.extensionPath, { skipAgent, agentType });
   }
 
   const version = context.extension.packageJSON.version as string;
-  const status = getDependencyStatus(context.extensionPath);
+  const status = getDependencyStatus(context.extensionPath, { skipAgent, agentType });
   const alreadyDone =
     context.globalState.get<string>(SETUP_STATE_KEY) === version &&
     status.reviewCli &&
@@ -75,17 +98,18 @@ export async function ensureDependencies(
     return status;
   }
 
-  const needsAgent = !status.agent;
-  if (status.reviewCli && !needsAgent && !options.force) {
+  const needsCursorAgentInstall =
+    !skipAgent && agentType === "cursor" && !status.agent;
+  if (status.reviewCli && !needsCursorAgentInstall && !options.force) {
     await context.globalState.update(SETUP_STATE_KEY, version);
     return status;
   }
 
   const runInstall = async () => {
     const reviewOk = isReviewCliPresent(context.extensionPath);
-    let agentOk = status.agent;
+    let agentOk = skipAgent ? true : status.agent;
 
-    if (needsAgent || options.force) {
+    if (needsCursorAgentInstall || (options.force && !skipAgent && agentType === "cursor")) {
       agentOk = await installCursorAgent();
     }
 
@@ -100,40 +124,56 @@ export async function ensureDependencies(
     return runInstall();
   }
 
+  const progressTitle =
+    agentType === "claude"
+      ? "AI Code Review：正在检查 Claude Code CLI…"
+      : "AI Code Review：正在安装 Cursor Agent CLI…";
+
   return vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
-      title: "Pre-push AI Review：正在安装 Cursor Agent CLI…",
+      title: progressTitle,
       cancellable: false,
     },
     async () => runInstall()
   );
 }
 
-export function notifyDependencyIssues(status: DependencyStatus): void {
+export function notifyDependencyIssues(
+  status: DependencyStatus,
+  options: Pick<DependencyOptions, "agentType"> = {}
+): void {
+  const agentType = options.agentType ?? "cursor";
   const missing: string[] = [];
   if (!status.reviewCli) {
     missing.push("扩展内置审查 CLI（请重新安装 VSIX 或联系维护者）");
   }
-  if (!status.agent) missing.push("Cursor Agent CLI（agent）");
+  if (!status.agent) {
+    missing.push(
+      agentType === "claude" ? "Claude Code CLI（claude）" : "Cursor Agent CLI（agent）"
+    );
+  }
   if (missing.length === 0) return;
 
-  const agentHint = "curl https://cursor.com/install -fsS | bash";
+  const agentHint =
+    agentType === "claude"
+      ? "请安装 Claude Code CLI（https://docs.anthropic.com/en/docs/claude-code/overview）"
+      : "curl https://cursor.com/install -fsS | bash";
   const msg = !status.reviewCli
-    ? `Pre-push 审查组件不完整：${missing.join("、")}。审查引擎已随 VSIX 打包，请重新执行 ./scripts/package-vscode.sh 生成并安装 VSIX。`
-    : `Pre-push 审查依赖未就绪：${missing.join("、")}。可执行「安装 Pre-push 依赖」或手动：${agentHint}`;
+    ? `AI Code Review 组件不完整：${missing.join("、")}。审查引擎已随 VSIX 打包，请重新执行 ./scripts/package-vscode.sh 生成并安装 VSIX。`
+    : `AI Code Review 依赖未就绪：${missing.join("、")}。可执行「安装 Agent CLI 依赖」、切换 Provider 模式，或手动：${agentHint}`;
 
   vscode.window
-    .showWarningMessage(
-      msg,
-      "安装依赖",
-      "查看文档"
-    )
+    .showWarningMessage(msg, "安装依赖", "查看文档")
     .then((choice) => {
       if (choice === "安装依赖") {
-        vscode.commands.executeCommand("cursor.prePush.installDeps");
+        vscode.commands.executeCommand("aiCodeReview.installDeps");
       } else if (choice === "查看文档") {
-        vscode.env.openExternal(vscode.Uri.parse("https://cursor.com/docs/cli/installation"));
+        const url =
+          agentType === "claude"
+            ? "https://docs.anthropic.com/en/docs/claude-code/overview"
+            : "https://cursor.com/docs/cli/installation";
+        vscode.env.openExternal(vscode.Uri.parse(url));
       }
     });
 }

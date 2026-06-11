@@ -7,7 +7,7 @@ export class ReportWebview {
     const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (!root) return;
 
-    const reportPath = path.join(root, ".cursor", "pre-push-find-bugs-last.md");
+    const reportPath = path.join(root, ".cursor", "ai-code-review-last.md");
     if (!fs.existsSync(reportPath)) {
       vscode.window.showInformationMessage("暂无审查报告");
       return;
@@ -15,8 +15,8 @@ export class ReportWebview {
 
     const content = fs.readFileSync(reportPath, "utf8");
     const panel = vscode.window.createWebviewPanel(
-      "prePushReport",
-      "Pre-push 审查报告",
+      "aiCodeReviewReport",
+      "AI Code Review 报告",
       vscode.ViewColumn.One,
       { enableScripts: true }
     );

@@ -1,78 +1,42 @@
-import { spawnSync } from "child_process";
+import { execFileSync, spawnSync } from "child_process";
 import * as os from "os";
 import * as path from "path";
-import { PrePushReviewConfig, resolveRuntimeConfig, shouldRunReview } from "./config";
-import { buildGitContext, buildGitContextForFiles, getChangedFiles, getMaxDiffChars, parsePositiveInt, resolveEffectiveBaseline, splitFilesIntoBatches } from "./git";
+import { ResolvedRuntimeConfig, resolveRuntimeConfig, shouldRunReview } from "./config";
+import {
+  buildGitContext,
+  buildGitContextForFiles,
+  buildStagedGitContext,
+  buildStagedGitContextForFiles,
+  buildUncommittedGitContext,
+  buildUncommittedGitContextForFiles,
+  filterReviewableChangedFiles,
+  getChangedFiles,
+  getMaxDiffChars,
+  getStagedChangedFiles,
+  getTotalDiffCharCount,
+  getUncommittedChangedFiles,
+  parsePositiveInt,
+  resolveEffectiveBaseline,
+  splitFilesIntoBatches,
+  splitStagedFilesIntoBatches,
+  splitUncommittedFilesIntoBatches,
+} from "./git";
+import { computePassCacheKey, readPassCacheKey, syncPassCache } from "./passCache";
+import { buildReviewPrompt } from "./prompt";
+import { runReviewProvider } from "./provider";
 import { findGitRepoRoot } from "./repo";
-import { parseReviewVerdict, Verdict } from "./verdict";
+import { ReviewResult, ReviewScope } from "./types";
+import {
+  looksLikeReviewConfigError,
+  looksLikeReviewInfraFailure,
+  parseReviewVerdict,
+  Verdict,
+} from "./verdict";
 import {
   emitReviewFailureBlock,
-  prePushReportPath,
+  reviewReportPath,
   writeLastReport,
 } from "./report";
-
-const FIND_BUGS_INSTRUCTIONS = `
-You are a read-only pre-push reviewer. **Do not** create or edit files; report only.
-
-## Baseline (vs stable)
-
-- Context below is computed from the configured baseline branch: **merge-base(HEAD, baseline)..HEAD**.
-- Your job: **understand what this branch is trying to deliver** (from commit messages + the diff) and check whether the **changed code** correctly implements that intent.
-- Do **not** invent requirements; if intent is unclear, say so and only report issues you can still prove from the diff.
-
-## Goal
-
-Find **bugs in the delta vs baseline** that matter for ship quality: data loss, auth/permission mistakes, crashes, wrong writes under normal use, broken contract vs visible spec in the diff, or clear user-facing breakage.
-
-## Scope
-
-- Primary evidence: **git log** and **git diff** blocks below (same merge-base..HEAD range).
-- Each finding must tie to **this diff** (paths/lines or new call paths).
-- If the diff ends with a truncation notice, do **not** claim critical issues for unseen hunks.
-
-## Confidence
-
-Give a **concrete repro** (user steps or request sequence). No repro → not critical → omit.
-
-## Ignore
-
-Style, naming, hypotheticals without a trigger, low-severity UX.
-
-## Project quirks (not defects — never FAIL on these alone)
-
-- Pre-push AI review can be disabled via workspace config; **do not** FAIL on this wiring alone.
-
-## Method
-
-1. Summarize what the branch changes vs baseline (data/API/UI flow).
-2. Infer requirement from commits + diff only.
-3. Check edge cases: empty lists, permissions, errors, async—**on changed paths**.
-4. **Exhaustive scan:** read **every path** in \`git diff --stat\` before writing PASS/FAIL. **Do not stop after the first bug.**
-
-## Output
-
-- **No critical in-scope bug:** short paragraph; include **no critical bugs found**.
-- **Has issues:** sort by severity. List **every** in-scope critical/high issue (numbered \`### Issue 1\`, \`### Issue 2\`, …). Per item: **Bug & impact** → **Intent vs code** → **Root cause** → **Minimal fix** → **Validate**.
-- Before the verdict line, include **### Files reviewed** — one line per changed path from stat (e.g. \`- src/foo.ts ✓\`). Every stat path must appear.
-
-## Exhaustive scan (required)
-
-- Finding **one** bug does **not** end the review. Collect **all** in-scope critical/high issues first, then output FAIL.
-- Incomplete file coverage causes repeated push failures; scan the **full** diff scope before FAIL/PASS.
-- If this prompt includes a **Batch scope** section, review **only** those paths in this batch, but still report **all** issues in that batch before the verdict line.
-
-## Machine-readable verdict (required)
-
-After all human-readable text, output **exactly one** line on its **own line** (ASCII only, no code fences):
-
-- If there is **no** in-scope critical/high-severity bug to fix before merge:
-  \`PRE_PUSH_REVIEW_VERDICT: PASS\`
-- If there **is** at least one such bug:
-  \`PRE_PUSH_REVIEW_VERDICT: FAIL\`
-
-Do not add any text after that line. The automation will **block git push** when it sees FAIL.
-
-`;
 
 function augmentedPathEnv(): NodeJS.ProcessEnv {
   const localBin = path.join(os.homedir(), ".local", "bin");
@@ -90,7 +54,12 @@ function resolveBin(envKey: string, commandName: string): string {
     return String(fromEnv).trim();
   }
   if (commandName === "agent") {
-    const localAgent = path.join(os.homedir(), ".local", "bin", "agent");
+    const localAgent = path.join(
+      os.homedir(),
+      ".local",
+      "bin",
+      process.platform === "win32" ? "agent.exe" : "agent"
+    );
     try {
       const fs = require("fs") as typeof import("fs");
       if (fs.existsSync(localAgent)) return localAgent;
@@ -100,6 +69,14 @@ function resolveBin(envKey: string, commandName: string): string {
   }
   try {
     const { execFileSync } = require("child_process");
+    if (process.platform === "win32") {
+      const out = execFileSync("where", [commandName], {
+        encoding: "utf8",
+        env: augmentedPathEnv(),
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim();
+      return out.split(/\r?\n/)[0]?.trim() || "";
+    }
     return execFileSync("bash", ["-lc", `command -v ${commandName}`], {
       encoding: "utf8",
       env: augmentedPathEnv(),
@@ -109,17 +86,7 @@ function resolveBin(envKey: string, commandName: string): string {
   }
 }
 
-function resolveBugReviewBackend(config: PrePushReviewConfig): "cursor" | "claude" {
-  const raw = process.env.AI_REVIEW_AGENT;
-  if (raw != null && String(raw).trim() !== "") {
-    const v = String(raw).trim().toLowerCase();
-    if (v === "claude" || v === "claude-code") return "claude";
-    return "cursor";
-  }
-  return config.agent;
-}
-
-function buildCursorAgentArgv(repoRoot: string, prompt: string): string[] {
+function buildCursorAgentArgv(repoRoot: string): string[] {
   return [
     "-p",
     "--trust",
@@ -129,7 +96,6 @@ function buildCursorAgentArgv(repoRoot: string, prompt: string): string[] {
     repoRoot,
     "--output-format",
     "text",
-    prompt,
   ];
 }
 
@@ -144,7 +110,7 @@ function buildClaudeCodeArgv(): string[] {
     "--tools",
     "",
   ];
-  const model = process.env.CURSOR_PRE_PUSH_CLAUDE_MODEL;
+  const model = process.env.AI_CODE_REVIEW_CLAUDE_MODEL;
   if (model != null && String(model).trim() !== "") {
     argv.push("--model", String(model).trim());
   }
@@ -175,92 +141,150 @@ function describeCliSpawnFailure(
   return null;
 }
 
-function maybeFetchBaseline(repoRoot: string, baseline: string): void {
+function maybeFetchBaseline(repoRoot: string, baseline: string, scope: ReviewScope): void {
+  if (scope === "uncommitted" || scope === "staged") return;
+  if (process.env.AI_CODE_REVIEW_SKIP_FETCH === "1") return;
   const fetchRef = baseline.replace(/^origin\//, "");
+  const fetchTimeoutMs = parsePositiveInt(process.env.AI_CODE_REVIEW_FETCH_TIMEOUT_MS, 60000);
   try {
-    const { execSync } = require("child_process");
-    execSync(`git fetch origin ${fetchRef}`, { cwd: repoRoot, stdio: "inherit" });
+    execFileSync("git", ["fetch", "origin", fetchRef], {
+      cwd: repoRoot,
+      stdio: "pipe",
+      timeout: fetchTimeoutMs,
+    });
   } catch {
     console.warn(
-      `[cursor-pre-push] git fetch origin ${fetchRef} 失败，将使用本地 ${baseline} 引用`
+      `[ai-code-review] git fetch origin ${fetchRef} 失败或超时（${fetchTimeoutMs}ms），将使用本地 ${baseline} 引用`
     );
   }
 }
 
-function buildReviewPrompt(ctxText: string, baseline: string): string {
-  return [
-    FIND_BUGS_INSTRUCTIONS,
-    "",
-    "## Repository context (local pre-push)",
-    "",
-    `Diff is **current branch vs ${baseline}** as described above. Read-only; do not modify files.`,
-    "",
-    ctxText,
-  ].join("\n");
+interface BackendRunResult {
+  combined: string;
+  cliFail: ReturnType<typeof describeCliSpawnFailure> | null;
+  skipped?: ReviewResult;
 }
 
-interface AgentRunResult {
-  combined: string;
-  cliFail: ReturnType<typeof describeCliSpawnFailure>;
+interface BatchProgress {
+  batchIndex: number;
+  batchTotal: number;
+  fileCount: number;
 }
 
 function runReviewAgent(
   repoRoot: string,
-  config: PrePushReviewConfig,
+  config: ResolvedRuntimeConfig,
   prompt: string,
-  backendLabel: string
-): AgentRunResult | { error: ReviewResult } {
-  const backend = resolveBugReviewBackend(config);
+  backendLabel: string,
+  progress?: BatchProgress
+): BackendRunResult {
   let bin: string;
   let argv: string[];
+  let useStdinPrompt = false;
 
-  if (backend === "claude") {
-    bin = resolveBin("CURSOR_PRE_PUSH_CLAUDE_BIN", "claude");
+  if (config.agent === "claude") {
+    bin = resolveBin("AI_CODE_REVIEW_CLAUDE_BIN", "claude");
     if (!bin) {
-      if (process.env.CURSOR_PRE_PUSH_ALLOW_MISSING_CLI === "1") {
-        console.warn("[cursor-pre-push] 未找到 claude CLI，跳过审查");
-        return { error: { ok: true, skipped: true, reason: "claude not found" } };
+      if (process.env.AI_CODE_REVIEW_ALLOW_MISSING_CLI === "1") {
+        console.warn("[ai-code-review] 未找到 claude CLI，跳过审查");
+        return {
+          combined: "",
+          cliFail: null,
+          skipped: { ok: true, skipped: true, reason: "claude not found" },
+        };
       }
-      console.error("[cursor-pre-push] 未找到 claude CLI");
-      return { error: { ok: false, reason: "claude not found" } };
+      console.error("[ai-code-review] 未找到 claude CLI");
+      return {
+        combined: "",
+        cliFail: { detail: "claude not found", ret: { ok: false, reason: "claude not found" } },
+      };
     }
     argv = buildClaudeCodeArgv();
+    useStdinPrompt = true;
   } else {
-    bin = resolveBin("CURSOR_AGENT_BIN", "agent");
+    bin = resolveBin("AI_CODE_REVIEW_AGENT_BIN", "agent");
     if (!bin) {
-      if (process.env.CURSOR_PRE_PUSH_ALLOW_MISSING_CLI === "1") {
-        console.warn("[cursor-pre-push] 未找到 agent CLI，跳过审查");
-        return { error: { ok: true, skipped: true, reason: "agent not found" } };
+      if (process.env.AI_CODE_REVIEW_ALLOW_MISSING_CLI === "1") {
+        console.warn("[ai-code-review] 未找到 agent CLI，跳过审查");
+        return {
+          combined: "",
+          cliFail: null,
+          skipped: { ok: true, skipped: true, reason: "agent not found" },
+        };
       }
-      console.error("[cursor-pre-push] 未找到 agent CLI");
-      return { error: { ok: false, reason: "agent not found" } };
+      console.error("[ai-code-review] 未找到 agent CLI");
+      return {
+        combined: "",
+        cliFail: { detail: "agent not found", ret: { ok: false, reason: "agent not found" } },
+      };
     }
-    argv = buildCursorAgentArgv(repoRoot, prompt);
+    argv = buildCursorAgentArgv(repoRoot);
+    useStdinPrompt = true;
   }
 
-  const timeoutMs = parsePositiveInt(process.env.CURSOR_PRE_PUSH_TIMEOUT_MS, config.timeoutMs);
-  const spawnOpts: {
-    cwd: string;
-    encoding: "utf8";
-    env: NodeJS.ProcessEnv;
-    timeout: number;
-    maxBuffer: number;
-    input?: string;
-  } = {
+  const timeoutMs = parsePositiveInt(
+    process.env.AI_CODE_REVIEW_TIMEOUT_MS,
+    config.timeoutMs
+  );
+  const spawnOpts: Parameters<typeof spawnSync>[2] = {
     cwd: repoRoot,
     encoding: "utf8",
     env: augmentedPathEnv(),
     timeout: timeoutMs,
     maxBuffer: 50 * 1024 * 1024,
+    ...(useStdinPrompt ? { input: prompt } : {}),
   };
-  if (backend === "claude") {
-    spawnOpts.input = prompt;
-  }
 
-  console.log(`[cursor-pre-push] 正在运行 ${backendLabel} 只读审查…`);
+  if (progress) {
+    console.log(
+      `[ai-code-review] 批次 ${progress.batchIndex}/${progress.batchTotal}：正在运行 ${backendLabel} 审查（${progress.fileCount} 个文件，超时 ${Math.round(timeoutMs / 60000)} 分钟）…`
+    );
+  } else {
+    console.log(
+      `[ai-code-review] 正在运行 ${backendLabel} 只读审查（超时 ${Math.round(timeoutMs / 60000)} 分钟）…`
+    );
+  }
   const r = spawnSync(bin, argv, spawnOpts);
   const combined = [r.stdout || "", r.stderr || ""].join("\n").trim();
   return { combined, cliFail: describeCliSpawnFailure(r, bin, timeoutMs) };
+}
+
+async function runReviewBackend(
+  repoRoot: string,
+  config: ResolvedRuntimeConfig,
+  prompt: string,
+  backendLabel: string,
+  progress?: BatchProgress
+): Promise<BackendRunResult | { error: ReviewResult }> {
+  if (config.reviewMode === "provider") {
+    const timeoutMs = parsePositiveInt(
+      process.env.AI_CODE_REVIEW_TIMEOUT_MS,
+      config.timeoutMs
+    );
+    console.log(`[ai-code-review] 正在调用 ${backendLabel} Provider 审查…`);
+    const result = await runReviewProvider(prompt, config.provider, timeoutMs);
+    if (!result.ok) {
+      return {
+        combined: result.combined || "",
+        cliFail: {
+          detail: result.reason ?? "provider failed",
+          ret: { ok: false, reason: result.reason ?? "provider failed" },
+        },
+      };
+    }
+    return { combined: result.combined, cliFail: null };
+  }
+
+  const run = runReviewAgent(repoRoot, config, prompt, backendLabel, progress);
+  if (run.skipped) return { error: run.skipped };
+  return run;
+}
+
+function backendLabel(config: ResolvedRuntimeConfig): string {
+  if (config.reviewMode === "provider") {
+    return `${config.provider.type} (${config.provider.model})`;
+  }
+  return config.agent === "claude" ? "Claude Code" : "Cursor Agent";
 }
 
 function aggregateBatchVerdict(verdicts: Array<Verdict>): Verdict {
@@ -270,7 +294,7 @@ function aggregateBatchVerdict(verdicts: Array<Verdict>): Verdict {
 }
 
 function stripEmbeddedVerdictLines(text: string): string {
-  return text.replace(/^PRE_PUSH_REVIEW_VERDICT:\s*(PASS|FAIL)\b\s*$/gim, "").trim();
+  return text.replace(/^AI_CODE_REVIEW_VERDICT:\s*(PASS|FAIL)\b\s*$/gim, "").trim();
 }
 
 function emitDiffTruncatedFailure(
@@ -278,19 +302,24 @@ function emitDiffTruncatedFailure(
   baseline: string,
   backendLabel: string,
   introLines: string[],
-  combined: string
+  combined: string,
+  blockOnFail: boolean
 ): ReviewResult {
-  const reportPath = prePushReportPath(repoRoot);
+  const reportPath = reviewReportPath(repoRoot);
   writeLastReport(repoRoot, combined, backendLabel, baseline);
+  if (!blockOnFail) {
+    console.warn("[ai-code-review] diff 过大，手动审查模式不阻断");
+    return { ok: true, skipped: true, reason: "diff truncated" };
+  }
   emitReviewFailureBlock({
-    bannerTitle: "pre-push 审查：diff 过大",
+    bannerTitle: "AI Code Review：diff 过大",
     introLines,
     combined,
     summaryVerdict: null,
     transcriptHeading: "----- 上下文 -----",
     footerLines: [
       `完整记录：${reportPath}`,
-      `可增大 CURSOR_PRE_PUSH_MAX_DIFF_CHARS（当前 ${getMaxDiffChars()}）或拆分提交后再 push`,
+      `可增大 AI_CODE_REVIEW_MAX_DIFF_CHARS（当前 ${getMaxDiffChars()}）或拆分提交`,
     ],
     baseline,
   });
@@ -298,41 +327,49 @@ function emitDiffTruncatedFailure(
 }
 
 function shouldUseBatchReview(
-  ctx: { truncated?: boolean; diffLoadFailed?: boolean },
-  changedFiles: string[]
+  ctx: { diffLoadFailed?: boolean },
+  changedFiles: string[],
+  totalDiffChars: number
 ): boolean {
-  if (process.env.CURSOR_PRE_PUSH_BATCH_REVIEW === "0") return false;
+  if (process.env.AI_CODE_REVIEW_BATCH_REVIEW === "0") {
+    return false;
+  }
   if (changedFiles.length === 0) return false;
   if (ctx.diffLoadFailed) return true;
-  if (ctx.truncated) return true;
-  return false;
+  return totalDiffChars > getMaxDiffChars();
 }
 
 function finalizeReviewOutcome(
   repoRoot: string,
   combined: string,
-  backendLabel: string,
+  label: string,
   baseline: string,
+  blockOnFail: boolean,
   explicitVerdict?: Verdict
 ): ReviewResult {
-  const reportPath = prePushReportPath(repoRoot);
-  writeLastReport(repoRoot, combined || "(no output)", backendLabel, baseline);
+  const reportPath = reviewReportPath(repoRoot);
+  writeLastReport(repoRoot, combined || "(no output)", label, baseline);
 
-  const allowIssues = process.env.CURSOR_PRE_PUSH_ALLOW_ISSUES === "1";
-  const verdictLoose = process.env.CURSOR_PRE_PUSH_VERDICT_LOOSE === "1";
+  const allowIssues = process.env.AI_CODE_REVIEW_ALLOW_ISSUES === "1";
+  const verdictLoose = process.env.AI_CODE_REVIEW_VERDICT_LOOSE === "1";
   const verdict = explicitVerdict !== undefined ? explicitVerdict : parseReviewVerdict(combined);
 
   if (!allowIssues) {
     if (verdict === "FAIL") {
+      if (!blockOnFail) {
+        console.warn("[ai-code-review] 结论 FAIL（手动审查，不阻断 git 操作）");
+        if (combined?.trim()) console.log(combined);
+        return { ok: true, reason: "review FAIL (non-blocking)" };
+      }
       emitReviewFailureBlock({
-        bannerTitle: "pre-push 审查：未通过",
-        introLines: ["[cursor-pre-push] 结论：FAIL。请先阅读「一眼摘要」，再查看完整输出。"],
+        bannerTitle: "AI Code Review：未通过",
+        introLines: ["[ai-code-review] 结论：FAIL。请先阅读「一眼摘要」，再查看完整输出。"],
         combined,
         summaryVerdict: verdict,
         transcriptHeading: "----- 完整审查输出（原文）-----",
         footerLines: [
           `完整记录：${reportPath}`,
-          "临时放行：CURSOR_PRE_PUSH_ALLOW_ISSUES=1 git push（不推荐）",
+          "临时放行：AI_CODE_REVIEW_ALLOW_ISSUES=1",
         ],
         baseline,
       });
@@ -340,19 +377,23 @@ function finalizeReviewOutcome(
     }
     if (verdict !== "PASS") {
       if (verdictLoose) {
-        console.warn("[cursor-pre-push] 未解析到 verdict，VERDICT_LOOSE=1 已生效");
+        console.warn("[ai-code-review] 未解析到 verdict，VERDICT_LOOSE=1 已生效");
+      } else if (!blockOnFail) {
+        console.warn("[ai-code-review] 无法判定 verdict（手动审查，不阻断）");
+        if (combined?.trim()) console.log(combined);
+        return { ok: true, reason: "verdict not parseable (non-blocking)" };
       } else {
         emitReviewFailureBlock({
-          bannerTitle: "pre-push 审查：无法判定",
+          bannerTitle: "AI Code Review：无法判定",
           introLines: [
-            "[cursor-pre-push] 输出中缺少有效的 PRE_PUSH_REVIEW_VERDICT: PASS 或 FAIL，已终止 push。",
+            "[ai-code-review] 输出中缺少有效的 AI_CODE_REVIEW_VERDICT: PASS 或 FAIL。",
           ],
           combined,
           summaryVerdict: null,
-          transcriptHeading: "----- 完整输出（便于排查是否漏印结论行）-----",
+          transcriptHeading: "----- 完整输出 -----",
           footerLines: [
             `完整记录：${reportPath}`,
-            "宽松模式：CURSOR_PRE_PUSH_VERDICT_LOOSE=1 git push",
+            "宽松模式：AI_CODE_REVIEW_VERDICT_LOOSE=1",
           ],
           baseline,
         });
@@ -361,118 +402,200 @@ function finalizeReviewOutcome(
     }
   }
 
-  if (combined && combined.trim()) {
+  if (blockOnFail) {
+    console.log(`[ai-code-review] 结论：${verdict ?? "PASS"}，允许继续 git 操作。完整报告：${reportPath}`);
+  } else if (combined?.trim()) {
     console.log(combined);
   }
-
-  return { ok: true };
+  return { ok: true, cacheable: blockOnFail && verdict === "PASS" };
 }
 
-function handleAgentCliFailure(
+async function handleBackendFailure(
   repoRoot: string,
   combined: string,
-  backendLabel: string,
+  label: string,
   baseline: string,
-  cliFail: NonNullable<ReturnType<typeof describeCliSpawnFailure>>
-): ReviewResult {
-  const softCli = process.env.CURSOR_PRE_PUSH_SOFT_CLI === "1";
-  const reportPath = prePushReportPath(repoRoot);
-  writeLastReport(repoRoot, combined || "(no output)", backendLabel, baseline);
+  blockOnFail: boolean,
+  detail: string,
+  batchCtx?: { batchIndex: number; batchTotal: number; priorVerdicts: Verdict[] }
+): Promise<ReviewResult> {
+  const softCli = process.env.AI_CODE_REVIEW_SOFT_CLI === "1";
+  const reportPath = reviewReportPath(repoRoot);
+  writeLastReport(repoRoot, combined || "(no output)", label, baseline);
 
-  if (softCli) {
-    console.error(`[cursor-pre-push] ${backendLabel} ${cliFail.detail}，已跳过审查`);
-    return { ok: true, skipped: true, reason: cliFail.detail };
+  const batchVerdict = parseReviewVerdict(combined);
+  if (batchVerdict === "FAIL") {
+    return finalizeReviewOutcome(
+      repoRoot,
+      combined,
+      label,
+      baseline,
+      blockOnFail,
+      "FAIL"
+    );
   }
+
+  if (batchVerdict === "PASS") {
+    return finalizeReviewOutcome(
+      repoRoot,
+      combined,
+      label,
+      baseline,
+      blockOnFail,
+      "PASS"
+    );
+  }
+
+  if (batchCtx?.priorVerdicts.some((v) => v === "FAIL")) {
+    return finalizeReviewOutcome(
+      repoRoot,
+      combined || "(prior batch FAIL)",
+      label,
+      baseline,
+      blockOnFail,
+      "FAIL"
+    );
+  }
+
+  const incompleteBatch =
+    batchCtx != null && batchCtx.batchIndex < batchCtx.batchTotal;
+  const configError = looksLikeReviewConfigError(detail);
+  const infraFailure = looksLikeReviewInfraFailure(detail);
+
+  if (softCli || !blockOnFail) {
+    if (configError || infraFailure || incompleteBatch) {
+      console.warn(`[ai-code-review] ${label} ${detail}（手动审查，不阻断）`);
+    } else {
+      console.error(`[ai-code-review] ${label} ${detail}，已跳过阻断`);
+    }
+    return { ok: true, skipped: true, reason: detail };
+  }
+
+  const introLines = [`[ai-code-review] ${label} ${detail}。`];
+  if (incompleteBatch) {
+    introLines.push(
+      `[ai-code-review] 分批审查未完成（${batchCtx!.batchIndex}/${batchCtx!.batchTotal} 批），剩余文件未审查。`
+    );
+  }
+  if (configError) {
+    introLines.push("[ai-code-review] Provider/API 配置或鉴权错误，请检查 API Key。");
+  } else if (infraFailure) {
+    introLines.push("[ai-code-review] 审查服务暂时不可用（网络/配额），非代码 FAIL。");
+  }
+
   emitReviewFailureBlock({
-    bannerTitle: "pre-push 审查：进程异常",
-    introLines: [
-      `[cursor-pre-push] ${backendLabel} ${cliFail.detail}，已终止 push。`,
-      "若确认属误报且仍需推送（不推荐）：CURSOR_PRE_PUSH_SOFT_CLI=1。",
-    ],
+    bannerTitle: incompleteBatch
+      ? "AI Code Review：审查未完成"
+      : configError
+        ? "AI Code Review：配置/鉴权错误"
+        : infraFailure
+          ? "AI Code Review：服务不可用"
+          : "AI Code Review：进程异常",
+    introLines,
     combined: combined || "(no output)",
-    summaryVerdict: parseReviewVerdict(combined || ""),
-    transcriptHeading: "----- 完整输出（stdout/stderr）-----",
+    summaryVerdict: batchVerdict,
+    transcriptHeading: "----- 完整输出 -----",
     footerLines: [
       `完整记录：${reportPath}`,
-      "CLI 失败仍放行 push：CURSOR_PRE_PUSH_SOFT_CLI=1",
+      "临时放行：AI_CODE_REVIEW_SOFT_CLI=1",
     ],
     baseline,
   });
-  return { ok: false, reason: cliFail.detail };
+  return { ok: false, reason: detail };
 }
 
-function runBatchedFileReview(
+async function runBatchedFileReview(
   repoRoot: string,
-  config: PrePushReviewConfig,
+  config: ResolvedRuntimeConfig,
+  scope: ReviewScope,
   baseline: string,
-  mergeBase: string,
+  mergeBase: string | undefined,
   changedFiles: string[],
-  backendLabel: string,
+  label: string,
   diffLoadFailed: boolean
-): ReviewResult {
+): Promise<ReviewResult> {
   const maxDiff = getMaxDiffChars();
-  const batches = splitFilesIntoBatches(repoRoot, mergeBase, changedFiles, maxDiff);
+  const batches =
+    scope === "uncommitted"
+      ? splitUncommittedFilesIntoBatches(repoRoot, changedFiles, maxDiff)
+      : scope === "staged"
+        ? splitStagedFilesIntoBatches(repoRoot, changedFiles, maxDiff)
+        : splitFilesIntoBatches(repoRoot, mergeBase!, changedFiles, maxDiff);
   const batchTotal = batches.length;
-  const batchReason = diffLoadFailed
-    ? "完整 diff 读取失败（可能超过 maxBuffer）"
-    : "diff 超过字符上限";
+  const batchReason = diffLoadFailed ? "完整 diff 读取失败" : "diff 超过字符上限";
+  const timeoutMs = parsePositiveInt(
+    process.env.AI_CODE_REVIEW_TIMEOUT_MS,
+    config.timeoutMs
+  );
+  const estMaxMin = Math.ceil((batchTotal * timeoutMs) / 60000);
   console.log(
-    `[cursor-pre-push] ${batchReason}，将分 ${batchTotal} 批审查（共 ${changedFiles.length} 个文件），全部完成后统一结论`
+    `[ai-code-review] ${batchReason}，将分 ${batchTotal} 批审查（共 ${changedFiles.length} 个文件，预计最长约 ${estMaxMin} 分钟）`
   );
 
   const sections: string[] = [];
-  const verdicts: Array<ReturnType<typeof parseReviewVerdict>> = [];
+  const verdicts: Verdict[] = [];
 
   for (let i = 0; i < batches.length; i++) {
     const files = batches[i];
-    const batchCtx = buildGitContextForFiles(
-      repoRoot,
-      baseline,
-      mergeBase,
-      files,
-      i + 1,
-      batchTotal
-    );
+    const batchCtx =
+      scope === "uncommitted"
+        ? buildUncommittedGitContextForFiles(repoRoot, files, i + 1, batchTotal)
+        : scope === "staged"
+          ? buildStagedGitContextForFiles(repoRoot, files, i + 1, batchTotal)
+          : buildGitContextForFiles(repoRoot, baseline, mergeBase!, files, i + 1, batchTotal);
+
     if (batchCtx.diffLoadFailed) {
-      const reportPath = prePushReportPath(repoRoot);
-      const msg = `[cursor-pre-push] 批次 ${i + 1}/${batchTotal} 无法读取 diff（${files.join(", ")}），可能单文件超过 maxBuffer`;
-      console.error(msg);
+      const msg = `[ai-code-review] 批次 ${i + 1}/${batchTotal} 无法读取 diff`;
+      if (!config.blockOnFail) {
+        console.warn(msg);
+        return { ok: true, skipped: true, reason: "batch diff load failed" };
+      }
       emitReviewFailureBlock({
-        bannerTitle: "pre-push 审查：diff 读取失败",
-        introLines: [msg, "无法在无 diff 内容的情况下审查，已终止 push。"],
+        bannerTitle: "AI Code Review：diff 读取失败",
+        introLines: [msg],
         combined: batchCtx.text,
         summaryVerdict: null,
         transcriptHeading: "----- 上下文 -----",
-        footerLines: [`完整记录：${reportPath}`],
+        footerLines: [`完整记录：${reviewReportPath(repoRoot)}`],
         baseline,
       });
       return { ok: false, reason: "batch diff load failed" };
     }
     if (batchCtx.truncated) {
-      const msg = `[cursor-pre-push] 批次 ${i + 1}/${batchTotal} 的 diff 超过 ${maxDiff} 字符（${files.join(", ")}），无法完整审查`;
       return emitDiffTruncatedFailure(
         repoRoot,
         baseline,
-        backendLabel,
-        [msg, "已终止 push。"],
-        batchCtx.text
+        label,
+        [`[ai-code-review] 批次 ${i + 1}/${batchTotal} diff 超过 ${maxDiff} 字符`],
+        batchCtx.text,
+        config.blockOnFail
       );
     }
-    const prompt = buildReviewPrompt(batchCtx.text, baseline);
-    const run = runReviewAgent(repoRoot, config, prompt, backendLabel);
+
+    const prompt = buildReviewPrompt(repoRoot, config.reviewPrompt, batchCtx.text, scope, baseline);
+    const run = await runReviewBackend(repoRoot, config, prompt, label, {
+      batchIndex: i + 1,
+      batchTotal,
+      fileCount: files.length,
+    });
     if ("error" in run) return run.error;
     if (run.cliFail) {
-      return handleAgentCliFailure(
+      return handleBackendFailure(
         repoRoot,
         run.combined,
-        backendLabel,
+        label,
         baseline,
-        run.cliFail
+        config.blockOnFail,
+        run.cliFail.detail,
+        { batchIndex: i + 1, batchTotal, priorVerdicts: verdicts }
       );
     }
 
     const batchVerdict = parseReviewVerdict(run.combined);
     verdicts.push(batchVerdict);
+    console.log(
+      `[ai-code-review] 批次 ${i + 1}/${batchTotal} 完成，结论：${batchVerdict ?? "（未输出 verdict）"}`
+    );
     sections.push(
       [
         `## 审查批次 ${i + 1}/${batchTotal}`,
@@ -487,128 +610,192 @@ function runBatchedFileReview(
 
   const overallVerdict = aggregateBatchVerdict(verdicts);
   const combinedParts = [
-    "# pre-push 分批审查汇总",
+    "# AI Code Review 分批汇总",
     "",
-    `共 ${batchTotal} 批、${changedFiles.length} 个变更文件；以下为各批完整输出（不含各批 verdict 行，避免与汇总结论混淆）。`,
+    `共 ${batchTotal} 批、${changedFiles.length} 个变更文件。`,
     "",
     sections.join("\n\n---\n\n"),
   ];
   if (overallVerdict) {
-    combinedParts.push("", `PRE_PUSH_REVIEW_VERDICT: ${overallVerdict}`);
+    combinedParts.push("", `AI_CODE_REVIEW_VERDICT: ${overallVerdict}`);
   } else {
     combinedParts.push(
       "",
-      "（部分批次缺少 PRE_PUSH_REVIEW_VERDICT: PASS/FAIL，无法汇总为 PASS）"
+      "（部分批次缺少 AI_CODE_REVIEW_VERDICT: PASS/FAIL，无法汇总为 PASS）"
     );
   }
-  const combined = combinedParts.join("\n");
-
   return finalizeReviewOutcome(
     repoRoot,
-    combined,
-    backendLabel,
+    combinedParts.join("\n"),
+    label,
     baseline,
+    config.blockOnFail,
     overallVerdict
   );
 }
 
-export interface ReviewResult {
-  ok: boolean;
-  skipped?: boolean;
-  reason?: string;
-}
-
-export function runReview(startDir: string): ReviewResult {
+export async function runReview(startDir: string): Promise<ReviewResult> {
   const repoRoot = findGitRepoRoot(startDir);
-  const config = resolveRuntimeConfig(repoRoot);
+  let config: ResolvedRuntimeConfig;
+  try {
+    config = resolveRuntimeConfig(repoRoot);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(msg);
+    console.error(
+      "[ai-code-review] 配置文件损坏，请修复 `.cursor/ai-code-review.json` 后重试。"
+    );
+    return { ok: false, reason: "config parse error" };
+  }
 
   if (!shouldRunReview(config)) {
-    console.log(
-      "[cursor-pre-push] 审查未启用（.cursor/pre-push-review.json 中 enabled=false 或未配置）"
-    );
+    console.log("[ai-code-review] 审查未启用（配置 enabled=false）");
     return { ok: true, skipped: true, reason: "disabled" };
   }
 
-  const configuredBaseline = config.baseline;
-  const { baseline, tried } = resolveEffectiveBaseline(repoRoot, configuredBaseline);
-  if (!baseline) {
-    console.error(
-      `[cursor-pre-push] 未找到可用基线分支，已尝试：${tried.join("、")}。请先 git fetch origin`
-    );
-    return { ok: false, reason: "baseline not found" };
-  }
-  if (configuredBaseline.trim() !== "auto" && configuredBaseline !== baseline) {
-    console.log(
-      `[cursor-pre-push] 配置基线 ${configuredBaseline} 不可用，已改用 ${baseline}`
-    );
-  } else if (configuredBaseline.trim() === "auto" || !configuredBaseline.trim()) {
-    console.log(`[cursor-pre-push] 自动选择基线分支：${baseline}`);
+  const scope = config.scope;
+  const label = backendLabel(config);
+  let baseline = config.baseline;
+  let mergeBase: string | undefined;
+
+  if (scope === "branch") {
+    const configuredBaseline = config.baseline;
+    const resolved = resolveEffectiveBaseline(repoRoot, configuredBaseline);
+    if (!resolved.baseline) {
+      console.error(
+        `[ai-code-review] 未找到可用基线分支，已尝试：${resolved.tried.join("、")}`
+      );
+      return { ok: false, reason: "baseline not found" };
+    }
+    baseline = resolved.baseline;
+    if (configuredBaseline.trim() === "auto" || !configuredBaseline.trim()) {
+      console.log(`[ai-code-review] 自动选择基线分支：${baseline}`);
+    }
+    maybeFetchBaseline(repoRoot, baseline, scope);
+  } else if (scope === "staged") {
+    baseline = "HEAD (staged)";
+    console.log("[ai-code-review] 审查范围：暂存区（即将 commit 的内容）");
+  } else {
+    baseline = "HEAD (uncommitted)";
+    console.log("[ai-code-review] 审查范围：未提交变更");
   }
 
-  maybeFetchBaseline(repoRoot, baseline);
+  const ctx =
+    scope === "uncommitted"
+      ? buildUncommittedGitContext(repoRoot)
+      : scope === "staged"
+        ? buildStagedGitContext(repoRoot)
+        : buildGitContext(repoRoot, baseline);
 
-  const ctx = buildGitContext(repoRoot, baseline);
-  if (!ctx.ok) {
-    console.error(
-      `[cursor-pre-push] 无法计算 merge-base(HEAD, ${baseline})，请先执行 git fetch origin ${baseline.replace(/^origin\//, "")}`
-    );
+  if (scope === "branch" && !ctx.ok) {
+    console.error(`[ai-code-review] 无法计算 merge-base(HEAD, ${baseline})`);
     return { ok: false, reason: "merge-base failed" };
   }
 
   if (ctx.isEmpty) {
-    console.log(`[cursor-pre-push] 相对 ${baseline} 无增量，跳过审查`);
+    console.log(`[ai-code-review] 无变更，跳过审查`);
     return { ok: true, skipped: true, reason: "empty delta" };
   }
 
-  const backend = resolveBugReviewBackend(config);
-  const backendLabel = backend === "claude" ? "Claude Code" : "Cursor Agent";
-  const mergeBase = ctx.mergeBase!;
-  const changedFiles = getChangedFiles(repoRoot, mergeBase);
+  mergeBase = ctx.mergeBase;
+  const allChangedFiles =
+    scope === "uncommitted"
+      ? getUncommittedChangedFiles(repoRoot)
+      : scope === "staged"
+        ? getStagedChangedFiles(repoRoot)
+        : getChangedFiles(repoRoot, mergeBase!);
+  const changedFiles = filterReviewableChangedFiles(allChangedFiles);
 
-  if (shouldUseBatchReview(ctx, changedFiles)) {
-    return runBatchedFileReview(
+  if (changedFiles.length === 0) {
+    console.log(`[ai-code-review] 无需要审查的源码变更，跳过审查`);
+    return { ok: true, skipped: true, reason: "no reviewable files" };
+  }
+
+  const totalDiffChars = getTotalDiffCharCount(repoRoot, scope, mergeBase, changedFiles);
+  const passCacheKey = computePassCacheKey(
+    repoRoot,
+    scope,
+    baseline,
+    mergeBase,
+    changedFiles,
+    config,
+    totalDiffChars
+  );
+
+  if (
+    config.blockOnFail &&
+    process.env.AI_CODE_REVIEW_FORCE_REVIEW !== "1" &&
+    readPassCacheKey(repoRoot) === passCacheKey
+  ) {
+    console.log("[ai-code-review] 命中 PASS 缓存，跳过审查");
+    return { ok: true, skipped: true, reason: "pass cache hit" };
+  }
+
+  let result: ReviewResult;
+
+  if (shouldUseBatchReview(ctx, changedFiles, totalDiffChars)) {
+    result = await runBatchedFileReview(
       repoRoot,
       config,
+      scope,
       baseline,
       mergeBase,
       changedFiles,
-      backendLabel,
+      label,
       Boolean(ctx.diffLoadFailed)
     );
+  } else if (ctx.diffLoadFailed) {
+    if (!config.blockOnFail) {
+      result = { ok: true, skipped: true, reason: "diff load failed" };
+    } else {
+      console.error("[ai-code-review] 完整 diff 读取失败，无法安全审查");
+      result = { ok: false, reason: "diff load failed" };
+    }
+  } else {
+    const reviewCtx =
+      scope === "uncommitted"
+        ? buildUncommittedGitContextForFiles(repoRoot, changedFiles, 1, 1)
+        : scope === "staged"
+          ? buildStagedGitContextForFiles(repoRoot, changedFiles, 1, 1)
+          : buildGitContextForFiles(repoRoot, baseline, mergeBase!, changedFiles, 1, 1);
+
+    if (reviewCtx.truncated) {
+      result = emitDiffTruncatedFailure(
+        repoRoot,
+        baseline,
+        label,
+        [`[ai-code-review] 源码 diff 超过 ${getMaxDiffChars()} 字符`],
+        reviewCtx.text,
+        config.blockOnFail
+      );
+    } else {
+      const prompt = buildReviewPrompt(
+        repoRoot,
+        config.reviewPrompt,
+        reviewCtx.text,
+        scope,
+        baseline
+      );
+      const run = await runReviewBackend(repoRoot, config, prompt, label);
+      if ("error" in run) return run.error;
+      result = run.cliFail
+        ? await handleBackendFailure(
+            repoRoot,
+            run.combined,
+            label,
+            baseline,
+            config.blockOnFail,
+            run.cliFail.detail
+          )
+        : finalizeReviewOutcome(
+            repoRoot,
+            run.combined,
+            label,
+            baseline,
+            config.blockOnFail
+          );
+    }
   }
 
-  if (ctx.diffLoadFailed) {
-    console.error(
-      "[cursor-pre-push] 完整 diff 读取失败且 CURSOR_PRE_PUSH_BATCH_REVIEW=0，无法安全审查，已终止 push"
-    );
-    return { ok: false, reason: "diff load failed" };
-  }
-
-  if (ctx.truncated) {
-    return emitDiffTruncatedFailure(
-      repoRoot,
-      baseline,
-      backendLabel,
-      [
-        `[cursor-pre-push] diff 超过 ${getMaxDiffChars()} 字符且 CURSOR_PRE_PUSH_BATCH_REVIEW=0，无法完整审查`,
-        "已终止 push。",
-      ],
-      ctx.text
-    );
-  }
-
-  const prompt = buildReviewPrompt(ctx.text, baseline);
-  const run = runReviewAgent(repoRoot, config, prompt, backendLabel);
-  if ("error" in run) return run.error;
-  if (run.cliFail) {
-    return handleAgentCliFailure(
-      repoRoot,
-      run.combined,
-      backendLabel,
-      baseline,
-      run.cliFail
-    );
-  }
-
-  return finalizeReviewOutcome(repoRoot, run.combined, backendLabel, baseline);
+  return syncPassCache(repoRoot, passCacheKey, result);
 }
