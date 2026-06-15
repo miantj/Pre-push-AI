@@ -3,7 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { execFileSync } from "child_process";
 import { HookType, SettingsProvider } from "../settings/settingsProvider";
-import { HOOK_RUNNER_REL } from "../shared/workspacePaths";
+import { HOOK_RUNNER_REL, WORKSPACE_CONFIG_REL } from "../shared/workspacePaths";
 import { removeHookRunnerScript, writeHookRunnerScript } from "./hookRunner";
 import { getBundledReviewCliPath } from "./runtimePaths";
 import { ensureWorkspaceReviewPrompt } from "./reviewPromptFile";
@@ -217,13 +217,24 @@ export class HookInstaller {
     const scope = HOOK_SCOPE[hookType];
     return [
       HOOK_START,
+      'is_skip_review() {',
+      '  case "$1" in 1|true|yes|TRUE|YES) return 0 ;; esac',
+      "  return 1",
+      "}",
+      'if is_skip_review "$SKIP_REVIEW"; then exit 0; fi',
       'export PATH="$HOME/.local/bin:$PATH"',
       'REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"',
       `HOOK_RUNNER="$REPO_ROOT/${HOOK_RUNNER_REL}"`,
+      `CONFIG_FILE="$REPO_ROOT/${WORKSPACE_CONFIG_REL}"`,
+      'if [ ! -f "$CONFIG_FILE" ]; then',
+      '  echo "[ai-code-review] 配置文件缺失（请在本机运行「启用 AI Code Review」）: $CONFIG_FILE" >&2',
+      "  exit 1",
+      "fi",
       'if [ -x "$HOOK_RUNNER" ]; then',
       `  "$HOOK_RUNNER" run --scope ${scope} || exit 1`,
       "else",
       '  echo "[ai-code-review] hook runner 不可用（请在本机运行「启用 AI Code Review」生成 hook.sh）: $HOOK_RUNNER" >&2',
+      "  exit 1",
       "fi",
       HOOK_END,
     ].join("\n");

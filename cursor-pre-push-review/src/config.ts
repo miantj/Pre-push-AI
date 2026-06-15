@@ -199,6 +199,11 @@ export function shouldRunReview(config: ResolvedRuntimeConfig): boolean {
   return config.enabled;
 }
 
+/** hook 模式下本地缺少配置文件时应 fail-closed（避免已提交 hook 壳层静默跳过） */
+export function isHookConfigMissing(repoRoot: string): boolean {
+  return !fs.existsSync(configFilePath(repoRoot));
+}
+
 function isTruthySkipFlag(raw: string | undefined): boolean {
   const v = raw?.trim().toLowerCase();
   return v === "1" || v === "true" || v === "yes";

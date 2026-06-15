@@ -3,6 +3,7 @@ import { logReviewStatus } from "./log";
 import * as os from "os";
 import * as path from "path";
 import {
+  isHookConfigMissing,
   isReviewSkipped,
   ResolvedRuntimeConfig,
   resolveRuntimeConfig,
@@ -124,6 +125,8 @@ function buildClaudeCodeArgv(): string[] {
   return argv;
 }
 
+const MAX_AGENT_OUTPUT_BYTES = 50 * 1024 * 1024;
+
 interface AgentSpawnOutcome {
   stdout: string;
   stderr: string;
@@ -131,6 +134,7 @@ interface AgentSpawnOutcome {
   signal: NodeJS.Signals | null;
   error?: Error;
   timedOut?: boolean;
+  outputOverflow?: boolean;
 }
 
 function describeCliSpawnFailure(
@@ -141,6 +145,12 @@ function describeCliSpawnFailure(
   const timedOut =
     "timedOut" in r && r.timedOut ||
     (r.error && (r.error as NodeJS.ErrnoException).code === "ETIMEDOUT");
+  if ("outputOverflow" in r && r.outputOverflow) {
+    return {
+      detail: `Agent 输出超过 ${MAX_AGENT_OUTPUT_BYTES} 字节上限`,
+      ret: { ok: false, reason: "output overflow" },
+    };
+  }
   if (timedOut) {
     return { detail: `审查超时（${timeoutMs}ms）`, ret: { ok: false, reason: "timeout" } };
   }
@@ -180,13 +190,27 @@ function spawnAgentAsync(
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let outputOverflow = false;
     let settled = false;
 
+    const appendChunk = (target: "stdout" | "stderr", chunk: Buffer | string): boolean => {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const currentLen = Buffer.byteLength(stdout) + Buffer.byteLength(stderr);
+      if (currentLen + buf.length > MAX_AGENT_OUTPUT_BYTES) {
+        outputOverflow = true;
+        proc.kill();
+        return false;
+      }
+      if (target === "stdout") stdout += buf.toString();
+      else stderr += buf.toString();
+      return true;
+    };
+
     proc.stdout?.on("data", (chunk) => {
-      stdout += chunk.toString();
+      if (!outputOverflow) appendChunk("stdout", chunk);
     });
     proc.stderr?.on("data", (chunk) => {
-      stderr += chunk.toString();
+      if (!outputOverflow) appendChunk("stderr", chunk);
     });
 
     if (opts.stdinPrompt && proc.stdin) {
@@ -221,6 +245,7 @@ function spawnAgentAsync(
         status,
         signal,
         timedOut,
+        outputOverflow,
       });
     });
 
@@ -232,6 +257,7 @@ function spawnAgentAsync(
         signal: null,
         error,
         timedOut,
+        outputOverflow,
       });
     });
   });
@@ -762,6 +788,13 @@ export async function runReview(startDir: string): Promise<ReviewResult> {
   }
 
   if (!shouldRunReview(config)) {
+    if (config.blockOnFail && isHookConfigMissing(repoRoot)) {
+      console.error(
+        "[ai-code-review] Git hook 已触发但本地缺少配置文件（.cursor/ai-code-review/config.json）；请在本机运行「启用 AI Code Review」。"
+      );
+      console.error("[ai-code-review] 临时放行：SKIP_REVIEW=1");
+      return { ok: false, reason: "config missing in hook mode" };
+    }
     console.log("[ai-code-review] 审查未启用（配置 enabled=false）");
     return { ok: true, skipped: true, reason: "disabled" };
   }
