@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 一键打包 Pre-push AI Review 扩展（VSIX）
-# cursor-pre-push-review 不发布 npm，构建结果通过 bundle:review 打入 VSIX
+# 一键打包 AI Code Review 扩展（VSIX）
+# ai-code-review CLI 不发布 npm，构建结果通过 bundle:review 打入 VSIX
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -21,7 +21,7 @@ else
   die "未找到 vsce，请执行: npm i -g @vscode/vsce"
 fi
 
-log "1/4 构建并内置 cursor-pre-push-review（无需 npm 发布）…"
+log "1/4 构建并内置 ai-code-review CLI（无需 npm 发布）…"
 cd "$REVIEW_DIR"
 if [[ ! -d node_modules ]]; then
   npm install

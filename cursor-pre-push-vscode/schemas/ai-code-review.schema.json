@@ -1,0 +1,89 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AI Code Review 工作区配置",
+  "description": "由「AI Code Review: 启用审查」生成。旁边有 ai-code-review.说明.md 解释各字段。",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "title": "总开关",
+      "description": "true = 启用审查；false = 不自动跑（仍可手动「运行审查」）",
+      "default": true
+    },
+    "hooks": {
+      "type": "array",
+      "title": "自动审查时机",
+      "description": "在哪些 Git 操作时自动审查。空数组 [] = 不装 hook，仅手动审查。",
+      "default": ["pre-push"],
+      "items": {
+        "type": "string",
+        "enum": ["pre-push", "pre-commit", "commit-msg", "post-merge"]
+      }
+    },
+    "reviewMode": {
+      "type": "string",
+      "title": "审查方式",
+      "description": "agent = 本机 Cursor/Claude CLI；provider = API Key 直连 LLM",
+      "enum": ["agent", "provider"],
+      "default": "agent"
+    },
+    "agent": {
+      "type": "string",
+      "title": "Agent 类型（reviewMode=agent 时）",
+      "description": "cursor 需安装 agent 命令；claude 需安装 claude 命令",
+      "enum": ["cursor", "claude"],
+      "default": "cursor"
+    },
+    "provider": {
+      "type": "object",
+      "title": "Provider 设置（reviewMode=provider 时）",
+      "description": "API Key 在扩展命令「设置 Provider API Key」中保存，不要写进 json",
+      "properties": {
+        "type": {
+          "type": "string",
+          "title": "平台",
+          "enum": ["deepseek", "minimax", "codex"],
+          "default": "deepseek"
+        },
+        "model": {
+          "type": "string",
+          "title": "模型名",
+          "description": "正在使用的模型 ID，如 deepseek-chat",
+          "default": "deepseek-chat"
+        },
+        "baseUrl": {
+          "type": "string",
+          "title": "API 根地址（可选）",
+          "description": "留空则用 type 对应平台默认；国内 MiniMax 可填 https://api.minimaxi.com"
+        },
+        "path": {
+          "type": "string",
+          "title": "API 路径（可选）",
+          "description": "与 baseUrl 拼接成完整请求地址。留空则用 type 对应默认路径"
+        }
+      },
+      "required": ["type", "model"]
+    },
+    "baseline": {
+      "type": "string",
+      "title": "分支对比基线",
+      "description": "审查「本分支改了什么」时跟谁比。推荐 auto（自动选 stable→dev→main→master）",
+      "default": "auto"
+    },
+    "defaultScope": {
+      "type": "string",
+      "title": "手动审查默认范围",
+      "description": "branch = 相对目标分支；uncommitted = 未提交；staged = 暂存区",
+      "enum": ["branch", "uncommitted", "staged"],
+      "default": "branch"
+    },
+    "timeoutMs": {
+      "type": "number",
+      "title": "超时（毫秒）",
+      "description": "单次审查最长等待时间，默认 900000（15 分钟）",
+      "default": 900000
+    }
+  },
+  "required": ["enabled"]
+}

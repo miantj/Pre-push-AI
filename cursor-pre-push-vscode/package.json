@@ -1,13 +1,13 @@
 {
-  "name": "cursor-pre-push-vscode",
-  "displayName": "Pre-push AI Review",
-  "description": "AI-powered pre-push code review for Cursor",
-  "version": "1.0.0",
+  "name": "ai-code-review",
+  "displayName": "AI Code Review",
+  "description": "AI-powered code review for Cursor / VS Code — branch diff or uncommitted changes",
+  "version": "1.1.0",
   "publisher": "YOUR-PUBLISHER-ID",
   "icon": "resources/icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/YOUR-ORG/cursor-pre-push-vscode"
+    "url": "https://github.com/YOUR-ORG/ai-code-review"
   },
   "license": "MIT",
   "engines": {
@@ -22,57 +22,157 @@
   "contributes": {
     "commands": [
       {
-        "command": "cursor.prePush.enable",
-        "title": "为当前工作区启用 Pre-push 审查"
+        "command": "aiCodeReview.enable",
+        "title": "启用 AI Code Review 自动审查",
+        "category": "AI Code Review"
       },
       {
-        "command": "cursor.prePush.disable",
-        "title": "禁用 Pre-push 审查"
+        "command": "aiCodeReview.disable",
+        "title": "禁用 AI Code Review 自动审查",
+        "category": "AI Code Review"
       },
       {
-        "command": "cursor.prePush.runReview",
-        "title": "立即审查当前分支"
+        "command": "aiCodeReview.runReview",
+        "title": "运行 AI Code Review 自动审查",
+        "category": "AI Code Review"
       },
       {
-        "command": "cursor.prePush.openReport",
-        "title": "查看上次审查报告"
+        "command": "aiCodeReview.openReport",
+        "title": "查看上次 AI Code Review 自动审查报告",
+        "category": "AI Code Review"
       },
       {
-        "command": "cursor.prePush.installDeps",
-        "title": "安装 Pre-push 依赖（Cursor Agent CLI）"
+        "command": "aiCodeReview.installDeps",
+        "title": "安装 AI Code Review Agent CLI 依赖",
+        "category": "AI Code Review"
+      },
+      {
+        "command": "aiCodeReview.setApiKey",
+        "title": "设置 AI Code Review Provider API Key",
+        "category": "AI Code Review"
+      },
+      {
+        "command": "aiCodeReview.openReviewPrompt",
+        "title": "打开 AI Code Review Prompt 文件",
+        "category": "AI Code Review"
+      },
+      {
+        "command": "aiCodeReview.previewReviewPrompt",
+        "title": "查看 AI Code Review 默认 Review Prompt",
+        "category": "AI Code Review"
+      },
+      {
+        "command": "aiCodeReview.resetReviewPrompt",
+        "title": "恢复 AI Code Review 默认 Review Prompt",
+        "category": "AI Code Review"
+      }
+    ],
+    "jsonValidation": [
+      {
+        "fileMatch": ".cursor/ai-code-review/config.json",
+        "url": "./schemas/ai-code-review.schema.json"
       }
     ],
     "configuration": {
-      "title": "Pre-push AI Review",
+      "title": "AI Code Review",
       "properties": {
-        "cursorPrePush.enabled": {
+        "aiCodeReview.enabled": {
           "type": "boolean",
           "default": false,
-          "description": "是否启用 Pre-push 审查"
+          "order": 1,
+          "description": "总开关：是否启用 AI Code Review",
+          "markdownDescription": "**总开关**\n\n- `true`：按下方 hook 设置在 git 操作时自动审查\n- `false`：不自动审查（仍可用命令 **运行审查**）\n\n首次使用请先执行命令面板：**AI Code Review: 启用审查**"
         },
-        "cursorPrePush.baseline": {
+        "aiCodeReview.hooks": {
+          "type": "array",
+          "default": ["pre-push"],
+          "order": 10,
+          "items": {
+            "type": "string",
+            "enum": ["pre-push", "pre-commit", "commit-msg", "post-merge"]
+          },
+          "description": "在哪些 Git 操作时自动审查",
+          "markdownDescription": "**什么时候自动审查？**\n\n| 值 | 含义 |\n| --- | --- |\n| `pre-push` | push 前（默认，推荐） |\n| `pre-commit` | 每次 commit 前 |\n| `commit-msg` | 写 commit message 时 |\n| `post-merge` | merge 之后 |\n\n- 可多选\n- 设为 **空数组 `[]`** = 不装 hook，只靠 `Cmd+Shift+P` → **运行审查**"
+        },
+        "aiCodeReview.reviewMode": {
           "type": "string",
-          "default": "auto",
-          "description": "diff 对比基线；auto 时按 origin/stable → dev → main → master 自动选择"
+          "default": "agent",
+          "order": 20,
+          "enum": ["agent", "provider"],
+          "enumDescriptions": [
+            "本机 Agent CLI（Cursor agent / Claude，默认）",
+            "API Key 直连云端 LLM（DeepSeek 等）"
+          ],
+          "description": "审查方式：agent 或 provider",
+          "markdownDescription": "**用什么 AI 审查？**\n\n- **agent**（默认）：调用本机 `agent` 或 `claude` 命令\n- **provider**：用 API Key 调 DeepSeek / MiniMax / OpenAI\n\n选 provider 后请执行：**AI Code Review: 设置 Provider API Key**"
         },
-        "cursorPrePush.agent": {
+        "aiCodeReview.agent": {
           "type": "string",
           "default": "cursor",
-          "enum": [
-            "cursor",
-            "claude"
+          "order": 21,
+          "enum": ["cursor", "claude"],
+          "enumDescriptions": [
+            "Cursor Agent（需 `agent --version` 可用）",
+            "Claude Code（需 `claude` 命令可用）"
           ],
-          "description": "审查后端"
+          "description": "Agent 模式：cursor 或 claude",
+          "markdownDescription": "仅 **reviewMode = agent** 时生效。\n\n选 Cursor 还是 Claude 作为审查后端。"
         },
-        "cursorPrePush.timeoutMs": {
+        "aiCodeReview.providerType": {
+          "type": "string",
+          "default": "deepseek",
+          "order": 22,
+          "enum": ["deepseek", "minimax", "codex"],
+          "enumDescriptions": ["DeepSeek", "MiniMax", "OpenAI Codex / GPT"],
+          "description": "Provider 平台",
+          "markdownDescription": "仅 **reviewMode = provider** 时生效。"
+        },
+        "aiCodeReview.providerModel": {
+          "type": "string",
+          "default": "deepseek-chat",
+          "order": 23,
+          "description": "Provider 模型名",
+          "markdownDescription": "模型 ID，如 `deepseek-chat`。留空则用各平台默认。"
+        },
+        "aiCodeReview.providerBaseUrl": {
+          "type": "string",
+          "default": "",
+          "order": 24,
+          "description": "Provider API 地址（一般留空）",
+          "markdownDescription": "一般 **留空**。仅在使用代理或私有部署时填写。"
+        },
+        "aiCodeReview.baseline": {
+          "type": "string",
+          "default": "auto",
+          "order": 30,
+          "description": "分支审查对比哪条远程分支",
+          "markdownDescription": "**分支审查时跟谁比？**\n\n- **`auto`**（推荐）：自动选 `origin/stable` → `origin/dev` → `origin/main` → `origin/master`\n- 或写死如 `origin/main`"
+        },
+        "aiCodeReview.defaultScope": {
+          "type": "string",
+          "default": "branch",
+          "order": 31,
+          "enum": ["branch", "uncommitted"],
+          "enumDescriptions": [
+            "相对目标分支（本分支累计改动）",
+            "未提交变更（暂存 + 工作区）"
+          ],
+          "description": "手动「运行审查」的默认范围",
+          "markdownDescription": "执行 **运行审查** 时 QuickPick 的默认高亮项。\n\n运行时仍可二选一。"
+        },
+        "aiCodeReview.timeoutMs": {
           "type": "number",
           "default": 900000,
-          "description": "审查超时毫秒"
+          "order": 50,
+          "description": "单次审查超时（毫秒）",
+          "markdownDescription": "默认 `900000` = 15 分钟。大 diff 可适当加大。"
         },
-        "cursorPrePush.autoInstallDependencies": {
+        "aiCodeReview.autoInstallDependencies": {
           "type": "boolean",
           "default": true,
-          "description": "扩展启动时自动安装 Cursor Agent CLI（审查引擎已内置在 VSIX 中）"
+          "order": 51,
+          "description": "启动时尝试安装 Cursor Agent CLI",
+          "markdownDescription": "Agent 模式下，扩展启动时检测并提示安装 `agent` 命令。Provider 模式可忽略。"
         }
       }
     }
@@ -81,7 +181,7 @@
     "vscode:prepublish": "npm run compile && npm run bundle:review",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "bundle:review": "cd ../cursor-pre-push-review && npm run build && cd ../cursor-pre-push-vscode && rm -rf node_modules/cursor-pre-push-review && mkdir -p node_modules/cursor-pre-push-review && cp -R ../cursor-pre-push-review/dist ../cursor-pre-push-review/bin ../cursor-pre-push-review/package.json node_modules/cursor-pre-push-review/ && npm install --prefix node_modules/cursor-pre-push-review --omit=dev"
+    "bundle:review": "cd ../cursor-pre-push-review && npm run build && cd ../cursor-pre-push-vscode && rm -rf node_modules/ai-code-review && mkdir -p node_modules/ai-code-review && cp -R ../cursor-pre-push-review/dist ../cursor-pre-push-review/bin ../cursor-pre-push-review/package.json node_modules/ai-code-review/ && npm install --prefix node_modules/ai-code-review --omit=dev"
   },
   "devDependencies": {
     "@types/node": "^20.19.41",

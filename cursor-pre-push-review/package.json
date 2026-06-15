@@ -1,9 +1,9 @@
 {
-  "name": "cursor-pre-push-review",
+  "name": "ai-code-review",
   "version": "1.0.0",
-  "description": "Pre-push AI code review CLI for Cursor",
+  "description": "AI Code Review CLI for Cursor/VS Code",
   "bin": {
-    "cursor-pre-push": "./bin/cursor-pre-push"
+    "ai-code-review": "./bin/ai-code-review"
   },
   "main": "dist/cli.js",
   "scripts": {

@@ -1,89 +1,94 @@
-# Pre-push AI Review
+# AI Code Review
 
-在 `git push` 前自动审查当前分支的增量代码，发现高严重度问题时拦截 push。
-
----
-
-## 使用步骤
-
-### 1. 安装扩展
-
-1. 获取 `cursor-pre-push-vscode-1.0.0.vsix`
-2. Cursor → **扩展** → `...` → **从 VSIX 安装**（或直接拖入 VSIX）
-
-### 2. 确认 Agent 可用（通常自动安装）
-
-扩展安装后会自动检测并尝试安装 Cursor Agent CLI。正常情况下无需手动安装，可在终端确认 `agent` 是否可用：
-
-```bash
-agent --version
-```
-
-若提示找不到 `agent`，可`Cmd+Shift+P`在命令面板执行 **安装 Pre-push 依赖（Cursor Agent CLI）**，或手动执行：
-
-```bash
-curl https://cursor.com/install -fsS | bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
-```
-
-### 3. 在项目中启用（必做）
-
-> 仅安装扩展不会自动生效，每个仓库需执行一次。
-
-1. 用 Cursor 打开项目根目录（含 `.git` 的文件夹）
-2. `Cmd+Shift+P` → **为当前工作区启用 Pre-push 审查**
-3. 若已有 pre-push hook，选 **继续安装**
-
-### 4. 正常使用
-
-```bash
-git fetch origin && git push
-```
-
-push 前会自动审查；报告见 `.cursor/pre-push-find-bugs-last.md`，也可命令面板 **查看上次审查报告**。
-
-不 push 时想先审查：`Cmd+Shift+P` → **立即审查当前分支**。
+在 Git push / commit 时自动审查，或用命令面板手动审查代码变更。
 
 ---
 
-## 常用命令
+## 三步上手
 
-| 命令 | 说明 |
+| 步骤 | 操作 |
 | --- | --- |
-| 为当前工作区启用 Pre-push 审查 | 安装 hook，开启审查 |
-| 禁用 Pre-push 审查 | 关闭审查，保留扩展 |
-| 立即审查当前分支 | 不 push，直接审查 |
-| 查看上次审查报告 | 打开报告文件 |
+| 1 | 安装 VSIX，重载窗口 |
+| 2 | `Cmd+Shift+P` → **AI Code Review: 启用审查** |
+| 3 | `git push`，或 **AI Code Review: 运行审查** |
+
+报告位置：`.cursor/ai-code-review-last.md`
 
 ---
 
-## 配置（可选）
+## 配置在哪看？
 
-启用后会生成 `.cursor/pre-push-review.json`，一般保持默认即可：
+启用审查后，项目里会出现两个文件（**建议先看说明文件**）：
 
-```json
-{
-  "enabled": true, //false则禁用审查
-  "baseline": "auto",
-  "agent": "cursor",
-  "timeoutMs": 900000
-}
+| 文件 | 给谁看 |
+| --- | --- |
+| `.cursor/ai-code-review.说明.md` | **普通人看这个** — 用人话解释当前每项配置 |
+| `.cursor/ai-code-review/config.json` | 给程序读 — 编辑时有字段提示和中文说明 |
+| `.cursor/ai-code-review-last.md` | 上次审查报告 |
+
+也可以在 Cursor 里：**设置 → 搜 `AI Code Review`**，每项都有中文说明和表格。
+
+---
+
+## 常用命令（Cmd+Shift+P）
+
+| 命令 | 什么时候用 |
+| --- | --- |
+| **启用审查** | 每个项目第一次用 |
+| **运行审查** | 不 push 也想先审代码 |
+| **查看上次报告** | 看 FAIL 原因 |
+| **设置 Provider API Key** | 用 DeepSeek 等 API 时 |
+| **安装 Agent CLI 依赖** | 提示找不到 `agent` 时 |
+| **禁用审查** | 关掉自动 hook |
+
+---
+
+## 两种审查方式（二选一）
+
+### 方式 A：Agent 模式（默认）
+
+用本机 Cursor / Claude 命令行，无需 API Key。
+
+```bash
+agent --version   # 确认已安装
 ```
 
-`baseline: "auto"` 会自动选择远程基线分支（stable → dev → main → master）。
+### 方式 B：Provider 模式
 
-Cursor 设置中搜索 `Pre-push` 也可修改配置。
+用 DeepSeek / MiniMax / OpenAI API。
+
+1. 设置里把 **Review Mode** 改成 `provider`
+2. 选 **Provider Type**
+3. `Cmd+Shift+P` → **设置 Provider API Key**
+
+> 若同时用 Git hook + Provider，推荐 `Cmd+Shift+P` → **设置 Provider API Key**（会自动写入 `.cursor/ai-code-review/env`）。也可手动在该文件写 `AI_CODE_REVIEW_API_KEY=你的key`（须用单引号包裹含特殊字符的值）
+
+---
+
+## 配置速查（人话版）
+
+| 你想… | 改哪个设置 |
+| --- | --- |
+| 关掉自动审查 | `enabled` = false，或 **禁用审查** |
+| 只在 push 前审 | `hooks` = `["pre-push"]`（默认） |
+| 不要 hook，只手动审 | `hooks` = `[]` |
+| 用 Cursor 还是 Claude | `agent` = cursor / claude |
+| 用 API 不用 Agent | `reviewMode` = provider |
+| 审本分支改动 | 手动选「相对目标分支」 |
+| 审未保存的改动 | 手动选「未提交变更」 |
+| 对照 PRD 审业务 | `referenceFiles` 填 md 路径 + 勾选 `businessLogic` 维度 |
+| 跳过审查直接 push | `SKIP_REVIEW=1 git push` 或别名 `git push-skip` |
+| 紧急 push（FAIL 时，仍审查） | 终端：`AI_CODE_REVIEW_ALLOW_ISSUES=1 git push` |
 
 ---
 
 ## 常见问题
 
-**push 没跑审查？** 确认已执行「启用 Pre-push 审查」，且 `.cursor/pre-push-review.json` 中 `"enabled": true`。
+**push 没跑审查？**  
+是否执行过 **启用审查**，且 `enabled: true`。
 
-**审查 FAIL 但要紧急推送？**
+**找不到 origin/stable？**  
+`baseline` 保持 `auto`，然后 `git fetch origin`。
 
-```bash
-CURSOR_PRE_PUSH_ALLOW_ISSUES=1 git push
-```
-
-**报错找不到 `origin/stable`？** 把 `baseline` 改为 `"auto"`，然后 `git fetch origin` 再 push。
+**Agent 提示 out of usage？**  
+换 `agent: claude`，或改用 Provider 模式。

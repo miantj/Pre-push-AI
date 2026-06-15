@@ -1,4 +1,14 @@
-.cursor/pre-push-find-bugs-last.md
 *.vsix
 .cursor/
 .vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# >>> ai-code-review (gitignore)
+# AI Code Review 扩展自动生成，勿提交
+.cursor/ai-code-review.说明.md
+.cursor/ai-code-review-last.md
+.cursor/ai-code-review/
+# <<< ai-code-review (gitignore)

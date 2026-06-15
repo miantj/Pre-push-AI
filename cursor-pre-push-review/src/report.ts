@@ -2,17 +2,14 @@ import * as fs from "fs";
 import * as path from "path";
 import { looksLikeReviewInfraFailure, parseReviewVerdict, Verdict } from "./verdict";
 
-const PRE_PUSH_REPORT_BASENAME = "pre-push-find-bugs-last.md";
+import { REVIEW_REPORT_REL } from "./paths";
 
-export function prePushReportPath(repoRoot: string): string {
-  return path.join(repoRoot, ".cursor", PRE_PUSH_REPORT_BASENAME);
+export function reviewReportPath(repoRoot: string): string {
+  return path.join(repoRoot, REVIEW_REPORT_REL);
 }
 
 function formatBeijingTime(date = new Date()): string {
-  return (
-    date.toLocaleString("sv-SE", { timeZone: "Asia/Shanghai" }).replace(" ", "T") +
-    "+08:00"
-  );
+  return date.toLocaleString("sv-SE", { timeZone: "Asia/Shanghai" });
 }
 
 function wrapMarkdownFencedCode(content: string): string {
@@ -35,7 +32,7 @@ function clipParagraph(s: string, max: number): string {
 
 /** 子节结束：下一标题 / 分隔 / 结论行 / 字符串末尾（不用 `$`，避免 multiline 下误匹配行尾） */
 const SUBSECTION_END =
-  "(?=\\n###\\s|\\n##\\s|\\n\\*{3,}\\s*\\n|\\n-{3,}\\s*\\n|^PRE_PUSH_REVIEW_VERDICT|(?![\\s\\S]))";
+  "(?=\\n###\\s|\\n##\\s|\\n\\*{3,}\\s*\\n|\\n-{3,}\\s*\\n|^AI_CODE_REVIEW_VERDICT|(?![\\s\\S]))";
 
 function extractSubsection(text: string, h3Pattern: string): string {
   const re = new RegExp(`${h3Pattern}\\s*\\n+([\\s\\S]*?)${SUBSECTION_END}`, "im");
@@ -63,7 +60,7 @@ function extractAllSubsections(text: string, h3Pattern: string): string[] {
 
 function extractIssueBlocks(text: string): string[] {
   const re =
-    /###\s*Issue\s+\d+[^\n]*\n+([\s\S]*?)(?=\n###\s*Issue\s+\d+|\n##\s|\n\*{3,}\s*\n|\n-{3,}\s*\n|^PRE_PUSH_REVIEW_VERDICT)/gim;
+    /###\s*Issue\s+\d+[^\n]*\n+([\s\S]*?)(?=\n###\s*Issue\s+\d+|\n##\s|\n\*{3,}\s*\n|\n-{3,}\s*\n|^AI_CODE_REVIEW_VERDICT)/gim;
   const out: string[] = [];
   for (const m of text.matchAll(re)) {
     const s = m[1]?.trim();
@@ -108,13 +105,14 @@ export function buildQuickSummary(combined: string, verdict: Verdict, baseline: 
   if (!verdict) {
     if (looksLikeReviewInfraFailure(raw)) {
       return [
-        "未能解析 PRE_PUSH_REVIEW_VERDICT：原始输出为 **Cursor 用量/配额类提示**（如 out of usage），**本次未完成代码审查**，不是对当前分支的 PASS/FAIL。",
-        "解决办法：① 在 Cursor 客户端按提示切换计费/提高限额；② 换后端：`AI_REVIEW_AGENT=claude`；③ 临时放行：`CURSOR_PRE_PUSH_VERDICT_LOOSE=1 git push`。",
+        "未能解析 AI_CODE_REVIEW_VERDICT：原始输出含 **用量/配额/网络类提示**，**本次未完成代码审查**，不是对当前变更的 PASS/FAIL。",
+        "解决办法：① 按 Cursor/Provider 提示切换计费或提高限额；② 换后端（Agent ↔ Provider）；③ 临时放行：`AI_CODE_REVIEW_SOFT_CLI=1` 或 `AI_CODE_REVIEW_VERDICT_LOOSE=1`。",
       ].join("\n");
     }
     return [
-      "未能解析 PRE_PUSH_REVIEW_VERDICT。",
-      "输出末尾需要单独一行：`PRE_PUSH_REVIEW_VERDICT: PASS` 或 `PRE_PUSH_REVIEW_VERDICT: FAIL`。",
+      "未能解析 AI_CODE_REVIEW_VERDICT。",
+      "输出末尾需要单独一行：`AI_CODE_REVIEW_VERDICT: PASS` 或 `AI_CODE_REVIEW_VERDICT: FAIL`。",
+      "若 CLI/Agent 进程异常退出，请查看终端输出或下方「Agent 原始输出」；基础设施类错误见 hook 阻断时的控制台提示。",
     ].join("\n");
   }
 
@@ -156,20 +154,22 @@ function verdictLabelZh(verdict: Verdict, body: string): string {
   if (verdict === "PASS") return "通过（PASS）";
   if (verdict === "FAIL") return "未通过（FAIL）";
   if (looksLikeReviewInfraFailure(body)) {
-    return "未能解析结论行（审查未完成：Cursor 用量/配额或服务限制）";
+    return "未能解析结论行（审查未完成：用量/配额或服务限制）";
   }
   return "未能解析结论行";
 }
 
 function pushBehaviorHint(verdict: Verdict, allowIssues: boolean, body: string): string {
-  if (allowIssues) return "当前环境：CURSOR_PRE_PUSH_ALLOW_ISSUES=1，FAIL 时仍可能允许 push（不推荐）。";
+  if (allowIssues) return "当前环境：AI_CODE_REVIEW_ALLOW_ISSUES=1，FAIL 时仍可能允许 push（不推荐）。";
   if (verdict === "PASS") return "默认允许继续 git push。";
   if (verdict === "FAIL") return "默认将拦截 git push；修复问题后可再 push。";
-  if (looksLikeReviewInfraFailure(body)) return "默认将拦截 git push；此为用量/配额导致审查未跑完。";
-  return "默认将拦截 git push（防止漏拦）；可设置 CURSOR_PRE_PUSH_VERDICT_LOOSE=1 放宽。";
+  if (looksLikeReviewInfraFailure(body)) {
+    return "默认将拦截 git push；此为用量/配额/网络导致审查未跑完。";
+  }
+  return "默认将拦截 git push（防止漏拦）；可设置 AI_CODE_REVIEW_VERDICT_LOOSE=1 放宽。";
 }
 
-export function formatPrePushReportFile(
+export function formatReviewReportFile(
   beijingTime: string,
   combined: string,
   backendLabel: string,
@@ -177,12 +177,12 @@ export function formatPrePushReportFile(
 ): string {
   const body = (combined || "").trim() || "(no output)";
   const verdict = parseReviewVerdict(body);
-  const allowIssues = process.env.CURSOR_PRE_PUSH_ALLOW_ISSUES === "1";
+  const allowIssues = process.env.AI_CODE_REVIEW_ALLOW_ISSUES === "1";
   const quick = buildQuickSummary(body, verdict, baseline);
   const fencedAgent = wrapMarkdownFencedCode(body);
 
   return [
-    `# pre-push 代码审查报告（${backendLabel} · 相对 ${baseline} 增量）`,
+    `# AI Code Review 报告（${backendLabel} · ${baseline}）`,
     "",
     `- **生成时间（北京时间）：** ${beijingTime}`,
     `- **审查结论：** ${verdictLabelZh(verdict, body)}`,
@@ -191,7 +191,7 @@ export function formatPrePushReportFile(
     "## 1. 先看这里：怎么读",
     "",
     "- 「一眼摘要」：从 Agent 输出里自动抽取影响 / 根因 / 修复 / 验证，方便 30 秒扫读。",
-    "- 「Agent 原始输出」：完整原文；解析结论请以文末 `PRE_PUSH_REVIEW_VERDICT:` 行为准。",
+    "- 「Agent 原始输出」：完整原文；解析结论请以文末 `AI_CODE_REVIEW_VERDICT:` 行为准。",
     "",
     "## 2. 一眼摘要（自动生成）",
     "",
@@ -212,10 +212,10 @@ export function writeLastReport(
 ): void {
   try {
     fs.mkdirSync(path.join(repoRoot, ".cursor"), { recursive: true });
-    const out = prePushReportPath(repoRoot);
+    const out = reviewReportPath(repoRoot);
     fs.writeFileSync(
       out,
-      formatPrePushReportFile(formatBeijingTime(), body, backendLabel, baseline),
+      formatReviewReportFile(formatBeijingTime(), body, backendLabel, baseline),
       "utf8"
     );
   } catch {
@@ -240,7 +240,7 @@ export function emitReviewFailureBlock(opts: {
   if (opts.combined?.trim()) {
     console.error(opts.combined);
   } else {
-    console.error("[cursor-pre-push] 未捕获到 Agent 文本输出，请打开报告文件查看。");
+    console.error("[ai-code-review] 未捕获到审查文本输出，请打开报告文件查看。");
   }
   console.error("----- 输出结束 -----\n");
   for (const line of opts.footerLines) console.error(line);

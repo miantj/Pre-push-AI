@@ -4,13 +4,20 @@ import { registerDisableCommand } from "./commands/disable";
 import { registerRunReviewCommand } from "./commands/runReview";
 import { registerOpenReportCommand } from "./commands/openReport";
 import { registerInstallDepsCommand } from "./commands/installDeps";
-import { SettingsProvider } from "./settings/settingsProvider";
+import { registerSetApiKeyCommand } from "./commands/setApiKey";
+import { registerReviewPromptCommands } from "./commands/reviewPrompt";
+import {
+  SettingsProvider,
+  WORKSPACE_CONFIG_REL,
+} from "./settings/settingsProvider";
+import { WORKSPACE_PROMPT_REL } from "./infrastructure/reviewPromptFile";
 import { HookInstaller } from "./infrastructure/hookInstaller";
 import { updateStatusBar } from "./infrastructure/statusBar";
 import {
   ensureDependencies,
   notifyDependencyIssues,
 } from "./infrastructure/dependencyInstaller";
+import { getReviewOutputChannel } from "./infrastructure/reviewOutput";
 
 export function activate(context: vscode.ExtensionContext) {
   const settingsProvider = new SettingsProvider();
@@ -20,29 +27,67 @@ export function activate(context: vscode.ExtensionContext) {
   registerDisableCommand(context, settingsProvider, hookInstaller);
   registerRunReviewCommand(context, settingsProvider, hookInstaller);
   registerOpenReportCommand(context);
-  registerInstallDepsCommand(context);
+  registerInstallDepsCommand(context, settingsProvider);
+  registerSetApiKeyCommand(context, settingsProvider, hookInstaller);
+  registerReviewPromptCommands(context, settingsProvider);
 
-  void ensureDependencies(context, { silent: true }).then((status) => {
+  const root = settingsProvider.workspaceRoot;
+  if (root) {
+    const configWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(root, WORKSPACE_CONFIG_REL)
+    );
+    const promptWatcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(root, WORKSPACE_PROMPT_REL)
+    );
+    const refresh = () => {
+      settingsProvider.invalidateCache();
+      updateStatusBar(settingsProvider, hookInstaller);
+      if (settingsProvider.hasConfigParseError) {
+        hookInstaller.removeAllManagedHooks();
+        updateStatusBar(settingsProvider, hookInstaller);
+        return;
+      }
+      void hookInstaller.syncFromConfig(settingsProvider).then(() => {
+        updateStatusBar(settingsProvider, hookInstaller);
+      });
+    };
+    const refreshGuide = () => {
+      settingsProvider.invalidateCache();
+      settingsProvider.writeWorkspaceGuideOnly();
+    };
+    configWatcher.onDidChange(refresh);
+    configWatcher.onDidCreate(refresh);
+    configWatcher.onDidDelete(refresh);
+    promptWatcher.onDidChange(refreshGuide);
+    promptWatcher.onDidCreate(refreshGuide);
+    context.subscriptions.push(configWatcher, promptWatcher);
+  }
+
+  const depOptions =
+    settingsProvider.reviewMode === "provider"
+      ? { silent: true as const, skipAgent: true }
+      : { silent: true as const, agentType: settingsProvider.agent };
+  void ensureDependencies(context, depOptions).then((status) => {
     if (!status.reviewCli) {
       notifyDependencyIssues(status);
       return;
     }
-    if (!status.agent) {
-      notifyDependencyIssues(status);
+    if (settingsProvider.reviewMode === "agent" && !status.agent) {
+      notifyDependencyIssues(status, { agentType: settingsProvider.agent });
     }
   });
 
-  updateStatusBar(settingsProvider, hookInstaller);
+  const legacyCleaned = hookInstaller.removeLegacyHookBlocks();
+  void hookInstaller.syncFromConfig(settingsProvider).then(() => {
+    updateStatusBar(settingsProvider, hookInstaller);
+    if (legacyCleaned > 0) {
+      void vscode.window.showInformationMessage(
+        `已自动移除 ${legacyCleaned} 个旧版 Pre-push 审查 hook 片段；若需继续自动审查，请运行「启用 AI Code Review」。`
+      );
+    }
+  });
 
-  context.subscriptions.push(
-    vscode.workspace.onDidChangeConfiguration((e) => {
-      if (!e.affectsConfiguration("cursorPrePush")) return;
-      if (hookInstaller.isHookInstalled()) {
-        hookInstaller.syncWorkspaceConfig(settingsProvider);
-      }
-      updateStatusBar(settingsProvider, hookInstaller);
-    })
-  );
+  context.subscriptions.push(getReviewOutputChannel());
 }
 
 export function deactivate() {}
