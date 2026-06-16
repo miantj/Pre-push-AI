@@ -210,9 +210,8 @@ function buildHookGuide(hooks: string[]): string[] {
     "",
     "Hook 通过 `.cursor/ai-code-review/hook.sh` 调用内置 CLI（本机生成，勿提交）。",
     "",
-    "- **config.json 不存在**（如新 clone 未运行扩展）：跳过审查，不阻断 push",
-    "- **config.json 存在但 hook.sh 不可用**：阻断 push 并提示在本机运行「启用 AI Code Review」（fail-closed）",
-    "- **hook.sh 存在但 node / CLI 缺失**：阻断 push 并提示错误（fail-closed）",
+    "- **config.json 或 hook.sh 未就绪**（新 clone、扩展未启用、runner 写入失败）：跳过审查，不阻断 push，终端会提示在本机运行「启用 AI Code Review」",
+    "- **hook.sh 存在但 node / CLI 缺失**：跳过审查并提示错误（不阻断 push；修复依赖后重新启用即可）",
     "",
     "**当前已配置：** " + (hooks.length ? hooks.map((h) => `\`${h}\``).join("、") : "无（仅手动审查）"),
     ""

@@ -174,13 +174,13 @@ export class HookInstaller {
     return null;
   }
 
-  /** 旧版 shell 片段缺少 SKIP_REVIEW / config 检查，或 runner 缺失时 fail-open */
+  /** 旧版 shell 片段缺少 SKIP_REVIEW / config 检查，或 setup 未完成时仍 exit 1 阻断 push */
   private needsHookBlockUpgrade(content: string): boolean {
     if (!content.includes(HOOK_START)) return false;
     if (!content.includes("is_skip_review")) return true;
     if (!content.includes("CONFIG_FILE")) return true;
-    if (/hook runner 不可用[\s\S]*?exit 0/m.test(content)) return true;
-    if (/配置文件缺失[\s\S]*?exit 0/m.test(content)) return true;
+    if (/配置文件缺失[\s\S]*?exit 1/m.test(content)) return true;
+    if (/hook runner 不可用[\s\S]*?exit 1/m.test(content)) return true;
     return false;
   }
 
@@ -269,14 +269,14 @@ export class HookInstaller {
       `HOOK_RUNNER="$REPO_ROOT/${HOOK_RUNNER_REL}"`,
       `CONFIG_FILE="$REPO_ROOT/${WORKSPACE_CONFIG_REL}"`,
       'if [ ! -f "$CONFIG_FILE" ]; then',
-      '  echo "[ai-code-review] 配置文件缺失（请在本机运行「启用 AI Code Review」）: $CONFIG_FILE" >&2',
-      "  exit 1",
+      '  echo "[ai-code-review] 配置文件缺失，跳过审查（请在本机运行「启用 AI Code Review」）: $CONFIG_FILE" >&2',
+      "  exit 0",
       "fi",
       'if [ -x "$HOOK_RUNNER" ]; then',
       `  "$HOOK_RUNNER" run --scope ${scope} || exit 1`,
       "else",
-      '  echo "[ai-code-review] hook runner 不可用（请在本机运行「启用 AI Code Review」）: $HOOK_RUNNER" >&2',
-      "  exit 1",
+      '  echo "[ai-code-review] hook runner 不可用，跳过审查（请在本机运行「启用 AI Code Review」）: $HOOK_RUNNER" >&2',
+      "  exit 0",
       "fi",
       HOOK_END,
     ].join("\n");
