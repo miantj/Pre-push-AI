@@ -166,6 +166,48 @@ export class HookInstaller {
     });
   }
 
+  private hookTypeFromPath(hookPath: string): HookType | null {
+    const base = path.basename(hookPath) as HookType;
+    if (["pre-push", "pre-commit", "commit-msg", "post-merge"].includes(base)) {
+      return base;
+    }
+    return null;
+  }
+
+  /** 旧版 shell 片段缺少 SKIP_REVIEW / config 检查，或 runner 缺失时 fail-open */
+  private needsHookBlockUpgrade(content: string): boolean {
+    if (!content.includes(HOOK_START)) return false;
+    if (!content.includes("is_skip_review")) return true;
+    if (!content.includes("CONFIG_FILE")) return true;
+    if (/hook runner 不可用[\s\S]*?exit 0/m.test(content)) return true;
+    if (/配置文件缺失[\s\S]*?exit 0/m.test(content)) return true;
+    return false;
+  }
+
+  /** 将已安装的旧版 hook 片段刷新为最新模板（扩展升级后自动生效） */
+  upgradeInstalledHookBlocks(): number {
+    if (!this.repoRoot) return 0;
+    let upgraded = 0;
+    for (const hookFile of this.findInstalledHookPaths()) {
+      try {
+        const content = fs.readFileSync(hookFile, "utf8");
+        if (!this.needsHookBlockUpgrade(content)) continue;
+        const hookType = this.hookTypeFromPath(hookFile);
+        if (!hookType) continue;
+        const next = this.upsertManagedBlock(
+          this.normalizeHookContent(content),
+          this.buildHookContent(hookType)
+        );
+        fs.writeFileSync(hookFile, next, "utf8");
+        fs.chmodSync(hookFile, "755");
+        upgraded += 1;
+      } catch {
+        // ignore per-file errors
+      }
+    }
+    return upgraded;
+  }
+
   /** 扩展激活时清理 v1.0 遗留 hook 片段，避免 git push 调用已失效的 CLI 路径 */
   removeLegacyHookBlocks(): number {
     if (!this.repoRoot) return 0;
@@ -233,7 +275,7 @@ export class HookInstaller {
       'if [ -x "$HOOK_RUNNER" ]; then',
       `  "$HOOK_RUNNER" run --scope ${scope} || exit 1`,
       "else",
-      '  echo "[ai-code-review] hook runner 不可用（请在本机运行「启用 AI Code Review」生成 hook.sh）: $HOOK_RUNNER" >&2',
+      '  echo "[ai-code-review] hook runner 不可用（请在本机运行「启用 AI Code Review」）: $HOOK_RUNNER" >&2',
       "  exit 1",
       "fi",
       HOOK_END,
@@ -356,13 +398,21 @@ export class HookInstaller {
       return;
     }
 
-    if (!this.syncHookRunnerScript()) return;
+    if (!this.syncHookRunnerScript()) {
+      vscode.window.showWarningMessage(
+        "写入 .cursor/ai-code-review/hook.sh 失败，Git hook 可能无法执行审查。"
+      );
+      return;
+    }
+
+    const skippedForeign: HookType[] = [];
 
     for (const hookType of hooks) {
       const targetPath = this.resolveHookTarget(hookType);
       const existing = this.normalizeHookContent(this.ensureHookFile(targetPath));
       const alreadyHasBlock = existing.includes(HOOK_START);
       if (!alreadyHasBlock && this.hasForeignHookContent(existing)) {
+        skippedForeign.push(hookType);
         vscode.window.showWarningMessage(
           `${hookType} 中已有其他逻辑，未自动追加审查片段；请使用「启用 AI Code Review」手动安装。`
         );
@@ -378,6 +428,12 @@ export class HookInstaller {
       } catch {
         // 静默失败，用户可重新「启用审查」
       }
+    }
+
+    if (skippedForeign.length > 0) {
+      vscode.window.showWarningMessage(
+        `未能向 ${skippedForeign.join(", ")} 追加审查片段（文件中已有其他逻辑）；请使用「启用 AI Code Review」手动安装，或调整 config.json 中的 hooks。`
+      );
     }
   }
 

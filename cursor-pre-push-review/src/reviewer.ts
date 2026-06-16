@@ -774,12 +774,9 @@ export async function runReview(startDir: string): Promise<ReviewResult> {
     const msg = e instanceof Error ? e.message : String(e);
     console.error(msg);
     console.error(
-      "[ai-code-review] 配置文件损坏，请修复 `.cursor/ai-code-review/config.json` 后重试。"
+      "[ai-code-review] 配置文件损坏，请检查 `.cursor/ai-code-review/config.json` 是否为合法 JSON（不支持注释、尾随逗号）。"
     );
-    if (
-      process.env.AI_CODE_REVIEW_SOFT_CLI === "1" &&
-      process.env.AI_CODE_REVIEW_FROM_HOOK === "1"
-    ) {
+    if (process.env.AI_CODE_REVIEW_SOFT_CLI === "1") {
       console.warn("[ai-code-review] SOFT_CLI=1，配置文件损坏时跳过审查（不阻断 git 操作）");
       return { ok: true, skipped: true, reason: "config parse error" };
     }

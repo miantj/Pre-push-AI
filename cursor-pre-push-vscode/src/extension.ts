@@ -57,7 +57,11 @@ export function activate(context: vscode.ExtensionContext) {
     };
     configWatcher.onDidChange(refresh);
     configWatcher.onDidCreate(refresh);
-    configWatcher.onDidDelete(refresh);
+    configWatcher.onDidDelete(() => {
+      settingsProvider.invalidateCache();
+      hookInstaller.removeAllManagedHooks();
+      updateStatusBar(settingsProvider, hookInstaller);
+    });
     promptWatcher.onDidChange(refreshGuide);
     promptWatcher.onDidCreate(refreshGuide);
     context.subscriptions.push(configWatcher, promptWatcher);
@@ -78,9 +82,14 @@ export function activate(context: vscode.ExtensionContext) {
   });
 
   const legacyCleaned = hookInstaller.removeLegacyHookBlocks();
+  const hooksUpgraded = hookInstaller.upgradeInstalledHookBlocks();
   void hookInstaller.syncFromConfig(settingsProvider).then(() => {
     updateStatusBar(settingsProvider, hookInstaller);
-    if (legacyCleaned > 0) {
+    if (hooksUpgraded > 0) {
+      void vscode.window.showInformationMessage(
+        `已升级 ${hooksUpgraded} 个 Git hook 片段至最新模板。`
+      );
+    } else if (legacyCleaned > 0) {
       void vscode.window.showInformationMessage(
         `已自动移除 ${legacyCleaned} 个旧版 Pre-push 审查 hook 片段；若需继续自动审查，请运行「启用 AI Code Review」。`
       );
