@@ -71,6 +71,11 @@ function extractIssueBlocks(text: string): string[] {
 
 function formatFindingBlock(index: number, body: string): string {
   const bugImpact = extractSubsection(body, "###\\s*Bug\\s*&\\s*impact");
+  const repro = extractSubsectionFirst(body, [
+    "###\\s*Concrete repro[^\\n]*",
+    "###\\s*复现[^\\n]*",
+    "###\\s*Repro[^\\n]*",
+  ]);
   const intent = extractSubsection(body, "###\\s*Intent\\s+vs\\s+code");
   const root = extractSubsectionFirst(body, ["###\\s*Root cause[^\\n]*", "###\\s*根因[^\\n]*"]);
   const fix = extractSubsectionFirst(body, ["###\\s*Minimal fix[^\\n]*", "###\\s*最小修复[^\\n]*"]);
@@ -78,6 +83,7 @@ function formatFindingBlock(index: number, body: string): string {
 
   const chunks: string[] = [`【问题 ${index}】`];
   if (bugImpact) chunks.push(`■ 影响（Bug & impact）\n${clipParagraph(bugImpact, 720)}`);
+  if (repro) chunks.push(`■ 复现（Concrete repro）\n${clipParagraph(repro, 720)}`);
   if (intent) chunks.push(`■ 意图 vs 代码\n${clipParagraph(intent, 520)}`);
   if (root) chunks.push(`■ 根因（路径 / 改动点）\n${clipParagraph(root, 920)}`);
   if (fix) chunks.push(`■ 建议修复\n${clipParagraph(fix, 620)}`);
@@ -132,6 +138,11 @@ export function buildQuickSummary(combined: string, verdict: Verdict, baseline: 
   }
 
   const bugImpact = extractSubsection(raw, "###\\s*Bug\\s*&\\s*impact");
+  const repro = extractSubsectionFirst(raw, [
+    "###\\s*Concrete repro[^\\n]*",
+    "###\\s*复现[^\\n]*",
+    "###\\s*Repro[^\\n]*",
+  ]);
   const intent = extractSubsection(raw, "###\\s*Intent\\s+vs\\s+code");
   const root = extractSubsectionFirst(raw, ["###\\s*Root cause[^\\n]*", "###\\s*根因[^\\n]*"]);
   const fix = extractSubsectionFirst(raw, ["###\\s*Minimal fix[^\\n]*", "###\\s*最小修复[^\\n]*"]);
@@ -139,6 +150,7 @@ export function buildQuickSummary(combined: string, verdict: Verdict, baseline: 
 
   const chunks: string[] = [];
   if (bugImpact) chunks.push(`■ 影响（Bug & impact）\n${clipParagraph(bugImpact, 720)}`);
+  if (repro) chunks.push(`■ 复现（Concrete repro）\n${clipParagraph(repro, 720)}`);
   if (intent) chunks.push(`■ 意图 vs 代码\n${clipParagraph(intent, 520)}`);
   if (root) chunks.push(`■ 根因（路径 / 改动点）\n${clipParagraph(root, 920)}`);
   if (fix) chunks.push(`■ 建议修复\n${clipParagraph(fix, 620)}`);
@@ -190,7 +202,7 @@ export function formatReviewReportFile(
     "",
     "## 1. 先看这里：怎么读",
     "",
-    "- 「一眼摘要」：从 Agent 输出里自动抽取影响 / 根因 / 修复 / 验证，方便 30 秒扫读。",
+    "- 「一眼摘要」：从 Agent 输出里自动抽取影响 / 复现 / 根因 / 修复 / 验证，方便 30 秒扫读。",
     "- 「Agent 原始输出」：完整原文；解析结论请以文末 `AI_CODE_REVIEW_VERDICT:` 行为准。",
     "",
     "## 2. 一眼摘要（自动生成）",

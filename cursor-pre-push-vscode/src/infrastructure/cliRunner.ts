@@ -120,6 +120,9 @@ export async function runCliReview(
     if (apiKey) {
       env.AI_CODE_REVIEW_API_KEY = apiKey;
     }
+    if (settingsProvider.providerAllowCustomUrl) {
+      env.AI_CODE_REVIEW_ALLOW_CUSTOM_PROVIDER_URL = "1";
+    }
 
     const proc = spawn(process.execPath, args, { cwd, env });
     const lastStatus = { value: "" };

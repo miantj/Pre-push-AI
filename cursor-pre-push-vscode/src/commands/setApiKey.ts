@@ -2,9 +2,8 @@ import * as vscode from "vscode";
 import {
   API_KEY_ENV_REL,
   getApiKey,
-  removeDotEnvApiKey,
   setApiKey,
-  writeDotEnvApiKey,
+  syncHookEnvFile,
 } from "../infrastructure/secrets";
 import { HookInstaller } from "../infrastructure/hookInstaller";
 import { updateStatusBar } from "../infrastructure/statusBar";
@@ -42,14 +41,17 @@ export function registerSetApiKeyCommand(
       await setApiKey(context, value);
       const repoRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
       if (!value.trim()) {
-        removeDotEnvApiKey(repoRoot);
+        syncHookEnvFile(repoRoot, settingsProvider.providerHookEnvOptions(""));
         await syncHooksAfterApiKeyChange(settingsProvider, hookInstaller);
         vscode.window.showInformationMessage(
           `API Key 已清除（SecretStorage + ${API_KEY_ENV_REL}）`
         );
         return;
       }
-      const wroteEnv = writeDotEnvApiKey(repoRoot, value);
+      const wroteEnv = syncHookEnvFile(
+        repoRoot,
+        settingsProvider.providerHookEnvOptions(value)
+      );
       if (wroteEnv === "ok") {
         await syncHooksAfterApiKeyChange(settingsProvider, hookInstaller);
         vscode.window.showInformationMessage(

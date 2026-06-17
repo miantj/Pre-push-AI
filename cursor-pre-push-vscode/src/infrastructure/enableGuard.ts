@@ -9,7 +9,7 @@ import {
   getApiKey,
   hasHookUsableApiKey,
   readDotEnvApiKey,
-  writeDotEnvApiKey,
+  syncHookEnvFile,
 } from "./secrets";
 
 /** 安装 hook 前的前置校验（enable / runReview 共用） */
@@ -37,15 +37,14 @@ export async function validateBeforeEnable(
     return false;
   }
 
-  if (settingsProvider.hooks.length === 0) return true;
-
   const repoRoot = settingsProvider.workspaceRoot;
-  if (hasHookUsableApiKey(repoRoot)) return true;
+  const secretKey = hasHookUsableApiKey(repoRoot)
+    ? undefined
+    : (await getApiKey(context)) || undefined;
+  syncHookEnvFile(repoRoot, settingsProvider.providerHookEnvOptions(secretKey));
 
-  const secretKey = await getApiKey(context);
-  if (secretKey && writeDotEnvApiKey(repoRoot, secretKey) === "ok") {
-    return true;
-  }
+  if (settingsProvider.hooks.length === 0) return true;
+  if (hasHookUsableApiKey(repoRoot)) return true;
 
   const choice = await vscode.window.showWarningMessage(
     `Provider 模式安装 Git hook 需要在 ${API_KEY_ENV_REL} 配置 AI_CODE_REVIEW_API_KEY`,

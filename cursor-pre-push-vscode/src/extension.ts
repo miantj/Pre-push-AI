@@ -7,6 +7,8 @@ import { registerInstallDepsCommand } from "./commands/installDeps";
 import { registerSetApiKeyCommand } from "./commands/setApiKey";
 import { registerReviewPromptCommands } from "./commands/reviewPrompt";
 import {
+  affectsAiCodeReviewConfiguration,
+  affectsProviderEnvConfiguration,
   SettingsProvider,
   WORKSPACE_CONFIG_REL,
 } from "./settings/settingsProvider";
@@ -95,6 +97,26 @@ export function activate(context: vscode.ExtensionContext) {
       );
     }
   });
+
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (!affectsAiCodeReviewConfiguration(e)) return;
+
+      settingsProvider.invalidateCache();
+
+      const refreshStatus = () => updateStatusBar(settingsProvider, hookInstaller);
+
+      // 尚无工作区 config.json 时，Cursor 设置即有效默认值，需完整同步 hook
+      if (!settingsProvider.hasWorkspaceConfigFile) {
+        void hookInstaller.syncFromConfig(settingsProvider).then(refreshStatus);
+        return;
+      }
+
+      if (affectsProviderEnvConfiguration(e)) {
+        void hookInstaller.syncProviderEnvFromSettings(settingsProvider).then(refreshStatus);
+      }
+    })
+  );
 
   context.subscriptions.push(getReviewOutputChannel());
 }

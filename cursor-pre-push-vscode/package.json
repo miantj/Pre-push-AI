@@ -2,7 +2,7 @@
   "name": "ai-code-review",
   "displayName": "AI Code Review",
   "description": "AI-powered code review for Cursor / VS Code — branch diff or uncommitted changes",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "publisher": "YOUR-PUBLISHER-ID",
   "icon": "resources/icon.png",
   "repository": {
@@ -138,8 +138,22 @@
           "type": "string",
           "default": "",
           "order": 24,
-          "description": "Provider API 地址（一般留空）",
-          "markdownDescription": "一般 **留空**。仅在使用代理或私有部署时填写。"
+          "description": "Provider API 根地址（一般留空）",
+          "markdownDescription": "一般 **留空**。私有部署 / FastGPT 示例：`https://aipre.yishouapp.com/api`\n\n启用审查时会写入工作区 `config.json` 的 `provider.baseUrl`。"
+        },
+        "aiCodeReview.providerPath": {
+          "type": "string",
+          "default": "",
+          "order": 25,
+          "description": "Provider API 路径（一般留空）",
+          "markdownDescription": "与 baseUrl 拼接成完整请求地址。FastGPT 示例：`/v1/chat/completions`\n\n启用审查时会写入工作区 `config.json` 的 `provider.path`。"
+        },
+        "aiCodeReview.providerAllowCustomUrl": {
+          "type": "boolean",
+          "default": false,
+          "order": 26,
+          "description": "允许自定义 Provider API 地址（私有部署 / FastGPT）",
+          "markdownDescription": "使用非官方白名单域名（如 FastGPT 私有化）时设为 **true**。\n\n启用审查 / 设置 API Key 时会自动写入 `.cursor/ai-code-review/env`：`AI_CODE_REVIEW_ALLOW_CUSTOM_PROVIDER_URL=1`"
         },
         "aiCodeReview.baseline": {
           "type": "string",

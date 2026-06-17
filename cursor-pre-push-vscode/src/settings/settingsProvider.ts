@@ -37,6 +37,23 @@ export interface AiCodeReviewConfig {
 const CONFIG_SECTION = "aiCodeReview";
 const VALID_HOOKS = new Set<string>(["pre-push", "pre-commit", "commit-msg", "post-merge"]);
 
+/** 变更后需同步 hook env 的 Cursor 设置项 */
+const PROVIDER_ENV_SETTING_KEYS = ["providerAllowCustomUrl", "reviewMode"] as const;
+
+export function affectsAiCodeReviewConfiguration(
+  e: vscode.ConfigurationChangeEvent
+): boolean {
+  return e.affectsConfiguration(CONFIG_SECTION);
+}
+
+export function affectsProviderEnvConfiguration(
+  e: vscode.ConfigurationChangeEvent
+): boolean {
+  return PROVIDER_ENV_SETTING_KEYS.some((key) =>
+    e.affectsConfiguration(`${CONFIG_SECTION}.${key}`)
+  );
+}
+
 const DEFAULTS: AiCodeReviewConfig = {
   enabled: false,
   hooks: ["pre-push"],
@@ -121,6 +138,7 @@ function configFromVscodeSettings(): AiCodeReviewConfig {
       type: providerType,
       model: getVscodeSetting<string>("providerModel", preset.defaultModel),
       baseUrl: getVscodeSetting<string>("providerBaseUrl", "").trim() || undefined,
+      path: getVscodeSetting<string>("providerPath", "").trim() || undefined,
     },
     baseline: getVscodeSetting<string>("baseline", "auto"),
     defaultScope:
@@ -239,6 +257,22 @@ export class SettingsProvider {
 
   get providerPath(): string {
     return this.getEffectiveConfig().provider.path ?? "";
+  }
+
+  /** 私有部署 / FastGPT 等非白名单域名需为 true，同步写入 hook env */
+  get providerAllowCustomUrl(): boolean {
+    return getVscodeSetting<boolean>("providerAllowCustomUrl", false);
+  }
+
+  /** 同步 hook env 文件时的选项（API Key 可选） */
+  providerHookEnvOptions(apiKey?: string): {
+    apiKey?: string;
+    allowCustomProviderUrl: boolean;
+  } {
+    return {
+      ...(apiKey !== undefined ? { apiKey } : {}),
+      allowCustomProviderUrl: this.providerAllowCustomUrl,
+    };
   }
 
   get baseline(): string {

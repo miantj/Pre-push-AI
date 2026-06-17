@@ -11,7 +11,8 @@ import {
   API_KEY_ENV_REL,
   getApiKey,
   hasHookUsableApiKey,
-  writeDotEnvApiKey,
+  syncHookEnvFile,
+  WriteApiKeyResult,
 } from "./secrets";
 
 const HOOK_START = "# >>> ai-code-review";
@@ -336,6 +337,83 @@ export class HookInstaller {
     removeHookRunnerScript(this.repoRoot);
   }
 
+  private syncProviderHookEnv(
+    settingsProvider: SettingsProvider,
+    apiKey?: string
+  ): WriteApiKeyResult {
+    if (settingsProvider.reviewMode !== "provider") return "ok";
+    return syncHookEnvFile(
+      this.repoRoot,
+      settingsProvider.providerHookEnvOptions(apiKey)
+    );
+  }
+
+  private warnEnvSyncFailure(writeResult: WriteApiKeyResult): void {
+    if (writeResult === "ok") return;
+    vscode.window.showWarningMessage(
+      `${API_KEY_ENV_REL} 无法写入（${writeResult}），Git hook 自动审查可能无法正常使用。`
+    );
+  }
+
+  private async resolveProviderSecretKeyForEnv(): Promise<string | undefined> {
+    if (hasHookUsableApiKey(this.repoRoot)) return undefined;
+    const secretKey = await getApiKey(this.context);
+    return secretKey || undefined;
+  }
+
+  /** 同步 hook env；warnOnFailure 时写入失败会提示用户 */
+  private async syncProviderEnvFromContext(
+    settingsProvider: SettingsProvider,
+    options?: { warnOnFailure?: boolean }
+  ): Promise<WriteApiKeyResult> {
+    if (settingsProvider.reviewMode !== "provider" || !this.repoRoot) return "ok";
+    const secretKey = await this.resolveProviderSecretKeyForEnv();
+    const writeResult = this.syncProviderHookEnv(settingsProvider, secretKey);
+    if (options?.warnOnFailure) this.warnEnvSyncFailure(writeResult);
+    return writeResult;
+  }
+
+  /** Cursor 设置变更时同步 hook env（不修改 config.json / hook 片段） */
+  async syncProviderEnvFromSettings(settingsProvider: SettingsProvider): Promise<void> {
+    await this.syncProviderEnvFromContext(settingsProvider, { warnOnFailure: true });
+  }
+
+  /** Provider 模式：同步 env 并校验 hook 是否具备 API Key */
+  private async ensureProviderHookEnv(
+    settingsProvider: SettingsProvider
+  ): Promise<boolean> {
+    if (settingsProvider.reviewMode !== "provider") return true;
+
+    const secretKey = !hasHookUsableApiKey(this.repoRoot)
+      ? await getApiKey(this.context)
+      : undefined;
+    const writeResult = this.syncProviderHookEnv(settingsProvider, secretKey || undefined);
+
+    if (writeResult !== "ok") {
+      if (hasHookUsableApiKey(this.repoRoot)) {
+        this.warnEnvSyncFailure(writeResult);
+      } else if (secretKey) {
+        this.removeAllManagedHooks();
+        this.disableHooksInConfig(settingsProvider);
+        vscode.window.showWarningMessage(
+          `${API_KEY_ENV_REL} 无法安全写入（${writeResult}），已移除 Git hook 并关闭自动审查；手动审查仍可使用 SecretStorage 中的 API Key。`
+        );
+        return false;
+      }
+    }
+
+    if (!hasHookUsableApiKey(this.repoRoot)) {
+      this.removeAllManagedHooks();
+      this.disableHooksInConfig(settingsProvider);
+      vscode.window.showWarningMessage(
+        `Provider 模式缺少 hook 可读取的 API Key（${API_KEY_ENV_REL}），已移除 Git hook 并关闭自动审查；请配置密钥后重新启用。`
+      );
+      return false;
+    }
+
+    return true;
+  }
+
   /** hook 无法安装时移除片段并同步关闭 enabled，避免配置与磁盘不一致 */
   private disableHooksInConfig(settingsProvider: SettingsProvider): void {
     settingsProvider.writeWorkspaceConfigFile(settingsProvider.toConfig(false));
@@ -366,35 +444,7 @@ export class HookInstaller {
       this.removeAllManagedHooks();
       return;
     }
-    if (
-      settingsProvider.reviewMode === "provider" &&
-      !hasHookUsableApiKey(this.repoRoot)
-    ) {
-      const secretKey = await getApiKey(this.context);
-      if (secretKey) {
-        const writeResult = writeDotEnvApiKey(this.repoRoot, secretKey);
-        if (writeResult === "ok") {
-          // SecretStorage 中已有密钥，已同步到 hook 可读取的 env 文件。
-        } else {
-          this.removeAllManagedHooks();
-          this.disableHooksInConfig(settingsProvider);
-          vscode.window.showWarningMessage(
-            `${API_KEY_ENV_REL} 无法安全写入（${writeResult}），已移除 Git hook 并关闭自动审查；手动审查仍可使用 SecretStorage 中的 API Key。`
-          );
-          return;
-        }
-      }
-    }
-
-    if (
-      settingsProvider.reviewMode === "provider" &&
-      !hasHookUsableApiKey(this.repoRoot)
-    ) {
-      this.removeAllManagedHooks();
-      this.disableHooksInConfig(settingsProvider);
-      vscode.window.showWarningMessage(
-        `Provider 模式缺少 hook 可读取的 API Key（${API_KEY_ENV_REL}），已移除 Git hook 并关闭自动审查；请配置密钥后重新启用。`
-      );
+    if (!(await this.ensureProviderHookEnv(settingsProvider))) {
       return;
     }
 
@@ -464,7 +514,11 @@ export class HookInstaller {
       );
       ensureWorkspaceReviewPrompt(this.context.extensionPath, this.repoRoot);
       const config = settingsProvider.toConfig(true);
-      return settingsProvider.writeWorkspaceConfigFile(config);
+      const ok = settingsProvider.writeWorkspaceConfigFile(config);
+      if (ok) {
+        await this.syncProviderEnvFromContext(settingsProvider, { warnOnFailure: true });
+      }
+      return ok;
     }
 
     this.removeStaleHooks(hooks);
@@ -516,6 +570,8 @@ export class HookInstaller {
       vscode.window.showErrorMessage("写入 .cursor/ai-code-review/config.json 失败");
       return false;
     }
+
+    await this.syncProviderEnvFromContext(settingsProvider, { warnOnFailure: true });
 
     vscode.window.showInformationMessage(
       `已启用 AI Code Review\n- hooks: ${hooks.join(", ") || "无（仅手动审查）"}\n- 配置说明: .cursor/ai-code-review.说明.md`

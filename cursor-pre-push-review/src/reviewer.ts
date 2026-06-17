@@ -218,13 +218,6 @@ function spawnAgentAsync(
       proc.stdin.end();
     }
 
-    const startedAt = Date.now();
-    const heartbeat = setInterval(() => {
-      const mins = Math.floor((Date.now() - startedAt) / 60000);
-      if (mins < 1) return;
-      logReviewStatus(`仍在等待 Agent 响应，已等待 ${mins} 分钟…`);
-    }, 60000);
-
     const timeoutHandle = setTimeout(() => {
       timedOut = true;
       proc.kill();
@@ -233,7 +226,6 @@ function spawnAgentAsync(
     const finish = (outcome: AgentSpawnOutcome) => {
       if (settled) return;
       settled = true;
-      clearInterval(heartbeat);
       clearTimeout(timeoutHandle);
       resolve(outcome);
     };
@@ -293,6 +285,58 @@ interface BatchProgress {
   fileCount: number;
 }
 
+/** Provider fetch 无流式输出，定期打印等待进度（Agent 子进程同理） */
+function startBackendWaitHeartbeat(backendKind: "Agent" | "Provider"): () => void {
+  const minSec = backendKind === "Provider" ? 15 : 60;
+  const intervalMs = backendKind === "Provider" ? 15000 : 60000;
+  const startedAt = Date.now();
+  const heartbeat = setInterval(() => {
+    const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
+    if (elapsedSec < minSec) return;
+    const mins = Math.floor(elapsedSec / 60);
+    const msg =
+      mins >= 1
+        ? `仍在等待 ${backendKind} 响应，已等待 ${mins} 分钟…`
+        : `仍在等待 ${backendKind} 响应，已等待 ${elapsedSec} 秒…`;
+    logReviewStatus(msg);
+  }, intervalMs);
+  return () => clearInterval(heartbeat);
+}
+
+function logBackendStart(
+  backendLabel: string,
+  backendKind: "Agent" | "Provider",
+  timeoutMs: number,
+  progress?: BatchProgress
+): void {
+  const timeoutMin = Math.round(timeoutMs / 60000);
+  const verb = backendKind === "Provider" ? "调用" : "运行";
+  const suffix = backendKind === "Provider" ? "Provider 审查" : "只读审查";
+  if (progress) {
+    logReviewStatus(
+      `批次 ${progress.batchIndex}/${progress.batchTotal}：正在${verb} ${backendLabel} 审查（${progress.fileCount} 个文件，超时 ${timeoutMin} 分钟）…`
+    );
+    return;
+  }
+  logReviewStatus(`正在${verb} ${backendLabel} ${suffix}（超时 ${timeoutMin} 分钟）…`);
+}
+
+async function runBackendWithWait<T>(
+  backendKind: "Agent" | "Provider",
+  backendLabel: string,
+  timeoutMs: number,
+  progress: BatchProgress | undefined,
+  run: () => Promise<T>
+): Promise<T> {
+  logBackendStart(backendLabel, backendKind, timeoutMs, progress);
+  const stopHeartbeat = startBackendWaitHeartbeat(backendKind);
+  try {
+    return await run();
+  } finally {
+    stopHeartbeat();
+  }
+}
+
 async function runReviewAgent(
   repoRoot: string,
   config: ResolvedRuntimeConfig,
@@ -348,21 +392,14 @@ async function runReviewAgent(
     process.env.AI_CODE_REVIEW_TIMEOUT_MS,
     config.timeoutMs
   );
-  if (progress) {
-    logReviewStatus(
-      `批次 ${progress.batchIndex}/${progress.batchTotal}：正在运行 ${backendLabel} 审查（${progress.fileCount} 个文件，超时 ${Math.round(timeoutMs / 60000)} 分钟）…`
-    );
-  } else {
-    logReviewStatus(
-      `正在运行 ${backendLabel} 只读审查（超时 ${Math.round(timeoutMs / 60000)} 分钟）…`
-    );
-  }
-  const r = await spawnAgentAsync(bin, argv, {
-    cwd: repoRoot,
-    env: augmentedPathEnv(),
-    timeoutMs,
-    stdinPrompt: useStdinPrompt ? prompt : undefined,
-  });
+  const r = await runBackendWithWait("Agent", backendLabel, timeoutMs, progress, () =>
+    spawnAgentAsync(bin, argv, {
+      cwd: repoRoot,
+      env: augmentedPathEnv(),
+      timeoutMs,
+      stdinPrompt: useStdinPrompt ? prompt : undefined,
+    })
+  );
   const combined = [r.stdout || "", r.stderr || ""].join("\n").trim();
   return { combined, cliFail: describeCliSpawnFailure(r, bin, timeoutMs) };
 }
@@ -379,8 +416,9 @@ async function runReviewBackend(
       process.env.AI_CODE_REVIEW_TIMEOUT_MS,
       config.timeoutMs
     );
-    logReviewStatus(`正在调用 ${backendLabel} Provider 审查…`);
-    const result = await runReviewProvider(prompt, config.provider, timeoutMs);
+    const result = await runBackendWithWait("Provider", backendLabel, timeoutMs, progress, () =>
+      runReviewProvider(prompt, config.provider, timeoutMs)
+    );
     if (!result.ok) {
       return {
         combined: result.combined || "",
